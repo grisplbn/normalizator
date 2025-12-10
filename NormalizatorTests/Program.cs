@@ -1,0 +1,36 @@
+﻿using Microsoft.Extensions.Configuration;
+using NormalizatorTests;
+
+var config = new ConfigurationBuilder()
+    .SetBasePath(Directory.GetCurrentDirectory())
+    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+    .Build();
+
+var originalFilePath = config["OriginalFilePath"];
+var resultFilePath = config["ResultFilePath"];
+var apiUrl = config["ApiUrl"];
+var probabilityThreshold = config.GetValue<decimal>("ProbabilityThreshold", new decimal(0.8));
+var maxParallelRequests = config.GetValue<int>("MaxParallelRequests", 10);
+
+// Konfiguracja testu bazy danych (opcjonalna)
+var dbResultFilePath = config["DbResultFilePath"];
+var dbConnectionString = config["DbConnectionString"];
+var dbQuery = config["DbQuery"];
+var dbQueryFilePath = config["DbQueryFilePath"];
+
+// Jeżeli podano plik z zapytaniem SQL, wczytujemy jego treść (ma pierwszeństwo nad DbQuery).
+if (!string.IsNullOrWhiteSpace(dbQueryFilePath) && File.Exists(dbQueryFilePath))
+{
+    dbQuery = await File.ReadAllTextAsync(dbQueryFilePath);
+}
+
+// Główne uruchomienie logiki testów w trybie asynchronicznym (API)
+await TestEngine.RunApiTest(originalFilePath!, resultFilePath!, apiUrl!, probabilityThreshold, maxParallelRequests);
+
+// Jeśli podano konfigurację DB, wykonujemy dodatkowy scenariusz z bazą
+if (!string.IsNullOrWhiteSpace(dbResultFilePath) &&
+    !string.IsNullOrWhiteSpace(dbConnectionString) &&
+    !string.IsNullOrWhiteSpace(dbQuery))
+{
+    await TestEngine.RunDbTest(originalFilePath!, dbResultFilePath!, dbConnectionString!, dbQuery!, maxParallelRequests);
+}
