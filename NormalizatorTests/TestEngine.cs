@@ -17,7 +17,7 @@ namespace NormalizatorTests
             var sheet = workbook.Worksheet(1);
 
             var rowsNo = sheet.Rows().Count();
-            Console.WriteLine($"[API] Start: wiersze={rowsNo - 1}, próg={probabilityThreshold}, równoległość={maxParallelRequests}");
+            Console.WriteLine($"{LogTs()} [API] Start: wiersze={rowsNo - 1}, próg={probabilityThreshold}, równoległość={maxParallelRequests}");
 
             // Tworzymy dodatkowe kolumny na wyniki, aby nie nadpisywać oczekiwanych wartości.
             AddResultColumns(sheet);
@@ -49,7 +49,7 @@ namespace NormalizatorTests
             }
 
             workbook.SaveAs(resultFilePath);
-            Console.WriteLine($"[API] Zakończono: zapisano do {resultFilePath}");
+            Console.WriteLine($"{LogTs()} [API] Zakończono: zapisano do {resultFilePath}");
         }
 
         // Główny przebieg testów dla DB: odczyt danych z Excela, zapytania SQL i zapis wielowynikowy.
@@ -61,7 +61,7 @@ namespace NormalizatorTests
             var indexes = GetColumnIndexes(sheet);
             var rowsNo = sheet.Rows().Count();
 
-            Console.WriteLine($"[DB] Start: wiersze={rowsNo - 1}, równoległość={maxParallelRequests}");
+            Console.WriteLine($"{LogTs()} [DB] Start: wiersze={rowsNo - 1}, równoległość={maxParallelRequests}");
 
             var semaphore = new SemaphoreSlim(maxParallelRequests);
             var tasks = new List<Task>();
@@ -85,7 +85,7 @@ namespace NormalizatorTests
                         var done = Interlocked.Increment(ref processed);
                         if (done % 50 == 0 || done == totalRows || done <= 5)
                         {
-                            Console.WriteLine($"[DB] Postęp: {done}/{totalRows}");
+                            Console.WriteLine($"{LogTs()} [DB] Postęp: {done}/{totalRows}");
                         }
                     }));
             }
@@ -106,7 +106,7 @@ namespace NormalizatorTests
             }
 
             workbook.SaveAs(dbResultFilePath);
-            Console.WriteLine($"[DB] Zakończono: zapisano do {dbResultFilePath}, maks liczba rekordów na wiersz={maxResults}");
+            Console.WriteLine($"{LogTs()} [DB] Zakończono: zapisano do {dbResultFilePath}, maks liczba rekordów na wiersz={maxResults}");
         }
 
         private static readonly string[] DbResultFieldOrder = new[]
@@ -406,6 +406,8 @@ namespace NormalizatorTests
         {
             return value == "null" ? string.Empty : value;
         }
+
+        private static string LogTs() => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
         private static string? GetDbString(IDataRecord record, string columnName)
         {
