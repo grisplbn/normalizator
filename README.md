@@ -21,6 +21,8 @@ Konfiguracja (`appsettings.json`)
 - `ApiUrl` – endpoint np. `https://localhost:7266/addresses/normalize`.
 - `ProbabilityThreshold` – minimalne `CombinedProbability`, od którego wpisujemy dane z API (domyślnie 0.8).
 - `MaxParallelRequests` – maksymalna liczba równoległych zapytań.
+- `EnableApi` – włącza/wyłącza przebieg API (domyślnie true).
+- `EnableDb` – włącza/wyłącza przebieg DB (domyślnie true).
 - `DbResultFilePath` – pełna ścieżka pliku wynikowego z bazy (drugi wynik).
 - `DbConnectionString` – connection string do Postgresa.
 - `DbQueryFilePath` – ścieżka do pliku z zapytaniem SQL (ma priorytet nad `DbQuery`).

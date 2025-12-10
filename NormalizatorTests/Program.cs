@@ -11,6 +11,8 @@ var resultFilePath = config["ResultFilePath"];
 var apiUrl = config["ApiUrl"];
 var probabilityThreshold = config.GetValue<decimal>("ProbabilityThreshold", new decimal(0.8));
 var maxParallelRequests = config.GetValue<int>("MaxParallelRequests", 10);
+var enableApi = config.GetValue<bool>("EnableApi", true);
+var enableDb = config.GetValue<bool>("EnableDb", true);
 
 // Konfiguracja testu bazy danych (opcjonalna)
 var dbResultFilePath = config["DbResultFilePath"];
@@ -25,10 +27,14 @@ if (!string.IsNullOrWhiteSpace(dbQueryFilePath) && File.Exists(dbQueryFilePath))
 }
 
 // Główne uruchomienie logiki testów w trybie asynchronicznym (API)
-await TestEngine.RunApiTest(originalFilePath!, resultFilePath!, apiUrl!, probabilityThreshold, maxParallelRequests);
+if (enableApi)
+{
+    await TestEngine.RunApiTest(originalFilePath!, resultFilePath!, apiUrl!, probabilityThreshold, maxParallelRequests);
+}
 
 // Jeśli podano konfigurację DB, wykonujemy dodatkowy scenariusz z bazą
-if (!string.IsNullOrWhiteSpace(dbResultFilePath) &&
+if (enableDb &&
+    !string.IsNullOrWhiteSpace(dbResultFilePath) &&
     !string.IsNullOrWhiteSpace(dbConnectionString) &&
     !string.IsNullOrWhiteSpace(dbQuery))
 {
