@@ -1,0 +1,8 @@
+{
+  "StreetName": "REQUEST_streetN",
+  "StreetPrefix": "REQUEST_streetP",
+  "BuildingNumber": "REQUEST_building",
+  "City": "REQUEST_city",
+  "PostalCode": "REQUEST_postal"
+}
+

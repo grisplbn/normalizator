@@ -15,11 +15,13 @@ namespace NormalizatorTests
             using var workbook = new XLWorkbook(originalFilePath);
             var sheet = workbook.Worksheet(1);
 
+            var rowsNo = sheet.Rows().Count();
+            Console.WriteLine($"[API] Start: wiersze={rowsNo - 1}, próg={probabilityThreshold}, równoległość={maxParallelRequests}");
+
             // Tworzymy dodatkowe kolumny na wyniki, aby nie nadpisywać oczekiwanych wartości.
             AddResultColumns(sheet);
 
             var indexes = GetColumnIndexes(sheet);
-            var rowsNo = sheet.Rows().Count();
 
             // Kontrolujemy równoległość zapytań, aby nie przeciążyć usługi.
             var semaphore = new SemaphoreSlim(maxParallelRequests);
@@ -46,10 +48,11 @@ namespace NormalizatorTests
             }
 
             workbook.SaveAs(resultFilePath);
+            Console.WriteLine($"[API] Zakończono: zapisano do {resultFilePath}");
         }
 
         // Główny przebieg testów dla DB: odczyt danych z Excela, zapytania SQL i zapis wielowynikowy.
-        public static async Task RunDbTest(string originalFilePath, string dbResultFilePath, string connectionString, string query, int maxParallelRequests)
+        public static async Task RunDbTest(string originalFilePath, string dbResultFilePath, string connectionString, string query, int maxParallelRequests, IDictionary<string, string> dbMapping)
         {
             using var workbook = new XLWorkbook(originalFilePath);
             var sheet = workbook.Worksheet(1);
@@ -57,13 +60,15 @@ namespace NormalizatorTests
             var indexes = GetColumnIndexes(sheet);
             var rowsNo = sheet.Rows().Count();
 
+            Console.WriteLine($"[DB] Start: wiersze={rowsNo - 1}, równoległość={maxParallelRequests}");
+
             var semaphore = new SemaphoreSlim(maxParallelRequests);
             var tasks = new List<Task>();
             var results = new ConcurrentDictionary<int, List<ApiResponseAddressDto>>();
 
             for (int i = 2; i <= rowsNo; i++)
             {
-                tasks.Add(ProcessDbRow(sheet, i, indexes, connectionString, query, semaphore, results));
+                tasks.Add(ProcessDbRow(sheet, i, indexes, connectionString, query, semaphore, results, dbMapping));
             }
 
             await Task.WhenAll(tasks);
@@ -82,6 +87,7 @@ namespace NormalizatorTests
             }
 
             workbook.SaveAs(dbResultFilePath);
+            Console.WriteLine($"[DB] Zakończono: zapisano do {dbResultFilePath}, maks liczba rekordów na wiersz={maxResults}");
         }
 
         private static readonly string[] DbResultFieldOrder = new[]
@@ -132,13 +138,14 @@ namespace NormalizatorTests
             string connectionString,
             string query,
             SemaphoreSlim semaphore,
-            ConcurrentDictionary<int, List<ApiResponseAddressDto>> results)
+            ConcurrentDictionary<int, List<ApiResponseAddressDto>> results,
+            IDictionary<string, string> dbMapping)
         {
             await semaphore.WaitAsync();
 
             try
             {
-                var rowResults = await GetDbResultsForRow(sheet, i, indexes, connectionString, query);
+                var rowResults = await GetDbResultsForRow(sheet, i, indexes, connectionString, query, dbMapping);
                 results.TryAdd(i, rowResults);
             }
             catch
@@ -296,13 +303,13 @@ namespace NormalizatorTests
         }
 
         // Wykonuje zapytanie do Postgresa i zwraca listę pasujących adresów dla wiersza.
-        private static async Task<List<ApiResponseAddressDto>> GetDbResultsForRow(IXLWorksheet sheet, int rowNo, ColumnIndexes idx, string connectionString, string query)
+        private static async Task<List<ApiResponseAddressDto>> GetDbResultsForRow(IXLWorksheet sheet, int rowNo, ColumnIndexes idx, string connectionString, string query, IDictionary<string, string> dbMapping)
         {
-            var streetName = sheet.Cell(rowNo, idx.RequestStreetIndex).Value.ToString();
-            var prefix = sheet.Cell(rowNo, idx.RequestPrefixIndex).Value.ToString();
-            var buildingNo = sheet.Cell(rowNo, idx.RequestBuildingNoIndex).Value.ToString();
-            var city = sheet.Cell(rowNo, idx.RequestCityIndex).Value.ToString();
-            var postalCode = sheet.Cell(rowNo, idx.RequestPostalCodeIndex).Value.ToString();
+            var streetName = GetRequestValue(sheet, rowNo, idx.RequestStreetIndex, dbMapping, "StreetName");
+            var prefix = GetRequestValue(sheet, rowNo, idx.RequestPrefixIndex, dbMapping, "StreetPrefix");
+            var buildingNo = GetRequestValue(sheet, rowNo, idx.RequestBuildingNoIndex, dbMapping, "BuildingNumber");
+            var city = GetRequestValue(sheet, rowNo, idx.RequestCityIndex, dbMapping, "City");
+            var postalCode = GetRequestValue(sheet, rowNo, idx.RequestPostalCodeIndex, dbMapping, "PostalCode");
 
             if (streetName == "null")
                 streetName = string.Empty;
@@ -344,6 +351,39 @@ namespace NormalizatorTests
             }
 
             return results;
+        }
+
+        private static string GetRequestValue(IXLWorksheet sheet, int rowNo, int fallbackIndex, IDictionary<string, string> mapping, string paramName)
+        {
+            // Jeżeli zdefiniowano mapowanie dla parametru, próbujemy znaleźć kolumnę po nagłówku.
+            if (mapping.TryGetValue(paramName, out var headerName) && !string.IsNullOrWhiteSpace(headerName))
+            {
+                var colIndex = GetColumnIndexByHeader(sheet, headerName);
+                if (colIndex.HasValue)
+                {
+                    return NormalizeRequestValue(sheet.Cell(rowNo, colIndex.Value).Value.ToString());
+                }
+            }
+
+            // Fallback do indeksu wyznaczonego standardowo (REQUEST_*).
+            return NormalizeRequestValue(sheet.Cell(rowNo, fallbackIndex).Value.ToString());
+        }
+
+        private static int? GetColumnIndexByHeader(IXLWorksheet sheet, string headerName)
+        {
+            var columnsNo = sheet.Columns().Count();
+            for (int i = columnsNo; i > 0; i--)
+            {
+                var header = sheet.Cell(1, i).Value.ToString();
+                if (string.Equals(header, headerName, StringComparison.OrdinalIgnoreCase))
+                    return i;
+            }
+            return null;
+        }
+
+        private static string NormalizeRequestValue(string value)
+        {
+            return value == "null" ? string.Empty : value;
         }
 
         private static string? GetDbString(IDataRecord record, string columnName)
