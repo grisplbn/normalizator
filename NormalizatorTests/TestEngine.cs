@@ -13,16 +13,22 @@ namespace NormalizatorTests
         // zapis wyników i wizualne oznaczenie poprawności.
         public static async Task RunApiTest(string originalFilePath, string resultFilePath, string apiUrl, decimal probabilityThreshold, int maxParallelRequests)
         {
+            Console.WriteLine($"{LogTs()} [API] Otwieranie pliku XLSX: {originalFilePath}");
             using var workbook = new XLWorkbook(originalFilePath);
             var sheet = workbook.Worksheet(1);
+            Console.WriteLine($"{LogTs()} [API] Plik XLSX otwarty pomyślnie");
 
             var rowsNo = sheet.Rows().Count();
             Console.WriteLine($"{LogTs()} [API] Start: wiersze={rowsNo - 1}, próg={probabilityThreshold}, równoległość={maxParallelRequests}");
 
             // Tworzymy dodatkowe kolumny na wyniki, aby nie nadpisywać oczekiwanych wartości.
+            Console.WriteLine($"{LogTs()} [API] Dodawanie kolumn wynikowych...");
             AddResultColumns(sheet);
+            Console.WriteLine($"{LogTs()} [API] Kolumny wynikowe dodane");
 
+            Console.WriteLine($"{LogTs()} [API] Analizowanie struktury kolumn...");
             var indexes = GetColumnIndexes(sheet);
+            Console.WriteLine($"{LogTs()} [API] Struktura kolumn przeanalizowana");
 
             // Kontrolujemy równoległość zapytań, aby nie przeciążyć usługi.
             var semaphore = new SemaphoreSlim(maxParallelRequests);
@@ -30,6 +36,8 @@ namespace NormalizatorTests
             var results = new ConcurrentDictionary<int, NormalizationApiResponseDto>();
             var totalRows = rowsNo - 1;
             var processed = 0;
+            
+            Console.WriteLine($"{LogTs()} [API] Tworzenie zadań dla {totalRows} wierszy...");
             for (int i = 2; i <= rowsNo; i++)
             {
                 tasks.Add(ProcessRow(
@@ -49,34 +57,46 @@ namespace NormalizatorTests
                         }
                     }));
             }
+            Console.WriteLine($"{LogTs()} [API] Utworzono {tasks.Count} zadań, rozpoczynam przetwarzanie...");
 
             await Task.WhenAll(tasks);
+            Console.WriteLine($"{LogTs()} [API] Wszystkie zapytania API zakończone, przetworzono {results.Count} wyników");
 
             // Po zebraniu odpowiedzi wpisujemy wyniki i kolorujemy komórki
             // (zielony = zgodność, czerwony = różnica).
+            Console.WriteLine($"{LogTs()} [API] Zapis wyników do arkusza i kolorowanie komórek...");
+            var writtenCount = 0;
             for (int i = 2; i <= rowsNo; i++)
             {
                 var result = results[i];
                 if (result.NormalizationMetadata?.CombinedProbability >= probabilityThreshold && result.Address != null)
                 {
                     WriteRowResult(sheet, i, indexes, result.Address);
+                    writtenCount++;
                 }
 
                 SetBackroundColor(sheet, i);
             }
+            Console.WriteLine($"{LogTs()} [API] Zapisano {writtenCount} wyników spełniających próg prawdopodobieństwa");
 
+            Console.WriteLine($"{LogTs()} [API] Zapis pliku wynikowego: {resultFilePath}");
             workbook.SaveAs(resultFilePath);
-            Console.WriteLine($"{LogTs()} [API] Zakończono: zapisano do {resultFilePath}");
+            Console.WriteLine($"{LogTs()} [API] Plik zapisany pomyślnie");
+            Console.WriteLine($"{LogTs()} [API] Zamykanie pliku XLSX...");
         }
 
         // Główny przebieg testów dla DB: odczyt danych z Excela, zapytania SQL i zapis wielowynikowy.
         public static async Task RunDbTest(string originalFilePath, string dbResultFilePath, string connectionString, string query, int maxParallelRequests, IDictionary<string, string> dbMapping)
         {
+            Console.WriteLine($"{LogTs()} [DB] Otwieranie pliku XLSX: {originalFilePath}");
             using var workbook = new XLWorkbook(originalFilePath);
             var sheet = workbook.Worksheet(1);
+            Console.WriteLine($"{LogTs()} [DB] Plik XLSX otwarty pomyślnie");
 
+            Console.WriteLine($"{LogTs()} [DB] Analizowanie struktury kolumn...");
             var indexes = GetColumnIndexes(sheet);
             var rowsNo = sheet.Rows().Count();
+            Console.WriteLine($"{LogTs()} [DB] Struktura kolumn przeanalizowana");
 
             Console.WriteLine($"{LogTs()} [DB] Start: wiersze={rowsNo - 1}, równoległość={maxParallelRequests}");
 
@@ -86,6 +106,7 @@ namespace NormalizatorTests
             var totalRows = rowsNo - 1;
             var processed = 0;
 
+            Console.WriteLine($"{LogTs()} [DB] Tworzenie zadań dla {totalRows} wierszy...");
             for (int i = 2; i <= rowsNo; i++)
             {
                 tasks.Add(ProcessDbRow(
@@ -106,23 +127,42 @@ namespace NormalizatorTests
                         }
                     }));
             }
+            Console.WriteLine($"{LogTs()} [DB] Utworzono {tasks.Count} zadań, rozpoczynam przetwarzanie...");
 
             await Task.WhenAll(tasks);
+            Console.WriteLine($"{LogTs()} [DB] Wszystkie zapytania SQL zakończone, przetworzono {results.Count} wierszy");
 
+            Console.WriteLine($"{LogTs()} [DB] Analizowanie wyników...");
             var maxResults = results.Values.DefaultIfEmpty(new List<ApiResponseAddressDto>()).Max(r => r.Count);
+            Console.WriteLine($"{LogTs()} [DB] Maksymalna liczba rekordów na wiersz: {maxResults}");
+            
             if (maxResults > 0)
             {
                 var startColumn = sheet.Columns().Count() + 1;
+                Console.WriteLine($"{LogTs()} [DB] Tworzenie nagłówków dla {maxResults} wyników na wiersz (start kolumna: {startColumn})...");
                 EnsureDbResultHeaders(sheet, startColumn, maxResults);
+                Console.WriteLine($"{LogTs()} [DB] Nagłówki utworzone");
 
+                Console.WriteLine($"{LogTs()} [DB] Zapis wyników do arkusza...");
+                var totalRecordsWritten = 0;
                 for (int i = 2; i <= rowsNo; i++)
                 {
                     results.TryGetValue(i, out var rowResults);
-                    WriteDbRowResults(sheet, i, startColumn, rowResults ?? new List<ApiResponseAddressDto>());
+                    var rowResultsList = rowResults ?? new List<ApiResponseAddressDto>();
+                    WriteDbRowResults(sheet, i, startColumn, rowResultsList);
+                    totalRecordsWritten += rowResultsList.Count;
                 }
+                Console.WriteLine($"{LogTs()} [DB] Zapisano łącznie {totalRecordsWritten} rekordów z bazy danych");
+            }
+            else
+            {
+                Console.WriteLine($"{LogTs()} [DB] Brak wyników do zapisania");
             }
 
+            Console.WriteLine($"{LogTs()} [DB] Zapis pliku wynikowego: {dbResultFilePath}");
             workbook.SaveAs(dbResultFilePath);
+            Console.WriteLine($"{LogTs()} [DB] Plik zapisany pomyślnie");
+            Console.WriteLine($"{LogTs()} [DB] Zamykanie pliku XLSX...");
             Console.WriteLine($"{LogTs()} [DB] Zakończono: zapisano do {dbResultFilePath}, maks liczba rekordów na wiersz={maxResults}");
         }
 
