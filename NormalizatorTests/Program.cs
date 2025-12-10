@@ -45,7 +45,8 @@ if (!string.IsNullOrWhiteSpace(dbMappingFilePath) && File.Exists(dbMappingFilePa
 // Główne uruchomienie logiki testów w trybie asynchronicznym (API)
 if (enableApi)
 {
-    await TestEngine.RunApiTest(originalFilePath!, resultFilePath!, apiUrl!, probabilityThreshold, maxParallelRequests);
+    var apiResultPath = AppendTimestampSuffix(resultFilePath);
+    await TestEngine.RunApiTest(originalFilePath!, apiResultPath, apiUrl!, probabilityThreshold, maxParallelRequests);
 }
 
 // Jeśli podano konfigurację DB, wykonujemy dodatkowy scenariusz z bazą
@@ -54,5 +55,16 @@ if (enableDb &&
     !string.IsNullOrWhiteSpace(dbConnectionString) &&
     !string.IsNullOrWhiteSpace(dbQuery))
 {
-    await TestEngine.RunDbTest(originalFilePath!, dbResultFilePath!, dbConnectionString!, dbQuery!, maxParallelRequests, dbMapping);
+    var dbResultPath = AppendTimestampSuffix(dbResultFilePath);
+    await TestEngine.RunDbTest(originalFilePath!, dbResultPath, dbConnectionString!, dbQuery!, maxParallelRequests, dbMapping);
+}
+
+static string AppendTimestampSuffix(string path)
+{
+    var timestamp = DateTime.Now.ToString("yyMMddHHmm");
+    var directory = Path.GetDirectoryName(path);
+    var filenameWithoutExt = Path.GetFileNameWithoutExtension(path);
+    var extension = Path.GetExtension(path);
+    var withSuffix = $"{filenameWithoutExt}_{timestamp}{extension}";
+    return string.IsNullOrWhiteSpace(directory) ? withSuffix : Path.Combine(directory, withSuffix);
 }
