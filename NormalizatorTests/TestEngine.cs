@@ -28,9 +28,26 @@ namespace NormalizatorTests
             var semaphore = new SemaphoreSlim(maxParallelRequests);
             var tasks = new List<Task>();
             var results = new ConcurrentDictionary<int, NormalizationApiResponseDto>();
+            var totalRows = rowsNo - 1;
+            var processed = 0;
             for (int i = 2; i <= rowsNo; i++)
             {
-                tasks.Add(ProcessRow(sheet, i, indexes, apiUrl, probabilityThreshold, semaphore, results));
+                tasks.Add(ProcessRow(
+                    sheet,
+                    i,
+                    indexes,
+                    apiUrl,
+                    probabilityThreshold,
+                    semaphore,
+                    results,
+                    () =>
+                    {
+                        var done = Interlocked.Increment(ref processed);
+                        if (done % 50 == 0 || done == totalRows || done <= 5)
+                        {
+                            Console.WriteLine($"{LogTs()} [API] Postęp: {done}/{totalRows}");
+                        }
+                    }));
             }
 
             await Task.WhenAll(tasks);
@@ -129,7 +146,8 @@ namespace NormalizatorTests
             string apiUrl, 
             decimal probabilityThreshold,
             SemaphoreSlim semaphore,
-            ConcurrentDictionary<int, NormalizationApiResponseDto> results)
+            ConcurrentDictionary<int, NormalizationApiResponseDto> results,
+            Action progressCallback)
         {
             await semaphore.WaitAsync();
 
@@ -146,6 +164,7 @@ namespace NormalizatorTests
             finally
             {
                 semaphore.Release();
+                progressCallback?.Invoke();
             }
         }
 
