@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using System.Data;
 using System.Net.Http.Json;
+using System.Threading;
 using Npgsql;
 
 namespace NormalizatorTests
@@ -65,10 +66,28 @@ namespace NormalizatorTests
             var semaphore = new SemaphoreSlim(maxParallelRequests);
             var tasks = new List<Task>();
             var results = new ConcurrentDictionary<int, List<ApiResponseAddressDto>>();
+            var totalRows = rowsNo - 1;
+            var processed = 0;
 
             for (int i = 2; i <= rowsNo; i++)
             {
-                tasks.Add(ProcessDbRow(sheet, i, indexes, connectionString, query, semaphore, results, dbMapping));
+                tasks.Add(ProcessDbRow(
+                    sheet,
+                    i,
+                    indexes,
+                    connectionString,
+                    query,
+                    semaphore,
+                    results,
+                    dbMapping,
+                    () =>
+                    {
+                        var done = Interlocked.Increment(ref processed);
+                        if (done % 50 == 0 || done == totalRows || done <= 5)
+                        {
+                            Console.WriteLine($"[DB] Postęp: {done}/{totalRows}");
+                        }
+                    }));
             }
 
             await Task.WhenAll(tasks);
@@ -139,7 +158,8 @@ namespace NormalizatorTests
             string query,
             SemaphoreSlim semaphore,
             ConcurrentDictionary<int, List<ApiResponseAddressDto>> results,
-            IDictionary<string, string> dbMapping)
+            IDictionary<string, string> dbMapping,
+            Action progressCallback)
         {
             await semaphore.WaitAsync();
 
@@ -155,6 +175,7 @@ namespace NormalizatorTests
             finally
             {
                 semaphore.Release();
+                progressCallback?.Invoke();
             }
         }
 
