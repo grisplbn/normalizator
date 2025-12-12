@@ -103,6 +103,7 @@ namespace NormalizatorTests
             var semaphore = new SemaphoreSlim(maxParallelRequests);
             var tasks = new List<Task>();
             var results = new ConcurrentDictionary<int, List<ApiResponseAddressDto>>();
+            var errorCount = new ConcurrentDictionary<string, int>(); // Śledzenie typów błędów
             var totalRows = rowsNo - 1;
             var processed = 0;
 
@@ -118,6 +119,7 @@ namespace NormalizatorTests
                     semaphore,
                     results,
                     dbMapping,
+                    errorCount,
                     () =>
                     {
                         var done = Interlocked.Increment(ref processed);
@@ -131,6 +133,20 @@ namespace NormalizatorTests
 
             await Task.WhenAll(tasks);
             Console.WriteLine($"{LogTs()} [DB] Wszystkie zapytania SQL zakończone, przetworzono {results.Count} wierszy");
+            
+            // Podsumowanie błędów
+            if (errorCount.Count > 0)
+            {
+                Console.WriteLine($"{LogTs()} [DB] ⚠️  Wykryto błędy podczas przetwarzania:");
+                foreach (var error in errorCount.OrderByDescending(e => e.Value))
+                {
+                    Console.WriteLine($"{LogTs()} [DB]   - {error.Key}: {error.Value} razy");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"{LogTs()} [DB] ✓ Wszystkie wiersze przetworzone bez błędów");
+            }
 
             Console.WriteLine($"{LogTs()} [DB] Analizowanie wyników...");
             var maxResults = results.Values.DefaultIfEmpty(new List<ApiResponseAddressDto>()).Max(r => r.Count);
@@ -218,6 +234,7 @@ namespace NormalizatorTests
             SemaphoreSlim semaphore,
             ConcurrentDictionary<int, List<ApiResponseAddressDto>> results,
             IDictionary<string, string> dbMapping,
+            ConcurrentDictionary<string, int> errorCount,
             Action progressCallback)
         {
             await semaphore.WaitAsync();
@@ -227,8 +244,22 @@ namespace NormalizatorTests
                 var rowResults = await GetDbResultsForRow(sheet, i, indexes, connectionString, query, dbMapping);
                 results.TryAdd(i, rowResults);
             }
-            catch
+            catch (Exception ex)
             {
+                // Logujemy błąd dla diagnostyki, ale kontynuujemy przetwarzanie
+                var errorKey = $"{ex.GetType().Name}: {ex.Message}";
+                errorCount.AddOrUpdate(errorKey, 1, (key, count) => count + 1);
+                
+                Console.WriteLine($"{LogTs()} [DB] ⚠️  BŁĄD w wierszu {i}: {ex.GetType().Name}");
+                Console.WriteLine($"{LogTs()} [DB]    Komunikat: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"{LogTs()} [DB]    Wewnętrzny błąd: {ex.InnerException.GetType().Name} - {ex.InnerException.Message}");
+                }
+                if (ex is IndexOutOfRangeException)
+                {
+                    Console.WriteLine($"{LogTs()} [DB]    Problem: Próba odczytu nieistniejącej kolumny z wyniku zapytania SQL");
+                }
                 results.TryAdd(i, new List<ApiResponseAddressDto>());
             }
             finally
@@ -415,18 +446,47 @@ namespace NormalizatorTests
             command.Parameters.AddWithValue("PostalCode", postalCode ?? string.Empty);
 
             await using var reader = await command.ExecuteReaderAsync();
+            
+            // Sprawdzamy dostępne kolumny w wyniku zapytania (przed pierwszym ReadAsync)
+            var availableColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var schemaTable = reader.GetSchemaTable();
+            if (schemaTable != null)
+            {
+                foreach (DataRow row in schemaTable.Rows)
+                {
+                    var columnName = row["ColumnName"]?.ToString();
+                    if (!string.IsNullOrEmpty(columnName))
+                    {
+                        availableColumns.Add(columnName);
+                    }
+                }
+            }
+            
+            // Oczekiwane kolumny
+            var expectedColumns = new[] { "StreetPrefix", "StreetName", "BuildingNumber", "City", "PostalCode", "Commune", "District", "Province" };
+            var missingColumns = expectedColumns.Where(col => !availableColumns.Contains(col)).ToList();
+            
+            // Logujemy brakujące kolumny tylko przy pierwszym wierszu (aby uniknąć spamowania)
+            if (rowNo == 2 && missingColumns.Any())
+            {
+                Console.WriteLine($"{LogTs()} [DB] ⚠️  OSTRZEŻENIE: Zapytanie SQL nie zwraca wszystkich oczekiwanych kolumn:");
+                Console.WriteLine($"{LogTs()} [DB]    Dostępne kolumny: {string.Join(", ", availableColumns.OrderBy(c => c))}");
+                Console.WriteLine($"{LogTs()} [DB]    Brakujące kolumny: {string.Join(", ", missingColumns)}");
+                Console.WriteLine($"{LogTs()} [DB]    Brakujące wartości będą ustawione na NULL");
+            }
+            
             while (await reader.ReadAsync())
             {
                 results.Add(new ApiResponseAddressDto
                 {
-                    StreetPrefix = GetDbString(reader, "StreetPrefix"),
-                    StreetName = GetDbString(reader, "StreetName"),
-                    BuildingNumber = GetDbString(reader, "BuildingNumber"),
-                    City = GetDbString(reader, "City"),
-                    PostalCode = GetDbString(reader, "PostalCode"),
-                    Commune = GetDbString(reader, "Commune"),
-                    District = GetDbString(reader, "District"),
-                    Province = GetDbString(reader, "Province")
+                    StreetPrefix = GetDbStringSafe(reader, "StreetPrefix", availableColumns, rowNo, missingColumns.Contains("StreetPrefix")),
+                    StreetName = GetDbStringSafe(reader, "StreetName", availableColumns, rowNo, missingColumns.Contains("StreetName")),
+                    BuildingNumber = GetDbStringSafe(reader, "BuildingNumber", availableColumns, rowNo, missingColumns.Contains("BuildingNumber")),
+                    City = GetDbStringSafe(reader, "City", availableColumns, rowNo, missingColumns.Contains("City")),
+                    PostalCode = GetDbStringSafe(reader, "PostalCode", availableColumns, rowNo, missingColumns.Contains("PostalCode")),
+                    Commune = GetDbStringSafe(reader, "Commune", availableColumns, rowNo, missingColumns.Contains("Commune")),
+                    District = GetDbStringSafe(reader, "District", availableColumns, rowNo, missingColumns.Contains("District")),
+                    Province = GetDbStringSafe(reader, "Province", availableColumns, rowNo, missingColumns.Contains("Province"))
                 });
             }
 
@@ -472,11 +532,63 @@ namespace NormalizatorTests
         {
             try
             {
+                // Sprawdzamy czy kolumna istnieje przed próbą odczytania
                 var ordinal = record.GetOrdinal(columnName);
+                if (ordinal < 0 || ordinal >= record.FieldCount)
+                {
+                    return null;
+                }
                 return record.IsDBNull(ordinal) ? null : record.GetString(ordinal);
             }
             catch (IndexOutOfRangeException)
             {
+                return null;
+            }
+            catch (ArgumentException)
+            {
+                // GetOrdinal rzuca ArgumentException gdy kolumna nie istnieje
+                return null;
+            }
+        }
+
+        private static string? GetDbStringSafe(IDataRecord record, string columnName, HashSet<string> availableColumns, int rowNo, bool isMissingColumn)
+        {
+            // Najpierw sprawdzamy czy kolumna istnieje w dostępnych kolumnach
+            if (!availableColumns.Contains(columnName))
+            {
+                // Logujemy tylko raz dla pierwszego wiersza z danymi (rowNo == 2 to pierwszy wiersz danych)
+                // Informacja o brakujących kolumnach jest już zalogowana wcześniej
+                return null;
+            }
+
+            try
+            {
+                var ordinal = record.GetOrdinal(columnName);
+                if (ordinal < 0 || ordinal >= record.FieldCount)
+                {
+                    if (rowNo == 2) // Logujemy tylko raz
+                    {
+                        Console.WriteLine($"{LogTs()} [DB] ⚠️  Kolumna '{columnName}' ma nieprawidłowy indeks: {ordinal} (FieldCount: {record.FieldCount})");
+                    }
+                    return null;
+                }
+                return record.IsDBNull(ordinal) ? null : record.GetString(ordinal);
+            }
+            catch (IndexOutOfRangeException ex)
+            {
+                if (rowNo == 2) // Logujemy tylko raz
+                {
+                    Console.WriteLine($"{LogTs()} [DB] ⚠️  IndexOutOfRangeException dla kolumny '{columnName}' w wierszu {rowNo}: {ex.Message}");
+                }
+                return null;
+            }
+            catch (ArgumentException ex)
+            {
+                // GetOrdinal rzuca ArgumentException gdy kolumna nie istnieje
+                if (rowNo == 2) // Logujemy tylko raz
+                {
+                    Console.WriteLine($"{LogTs()} [DB] ⚠️  ArgumentException dla kolumny '{columnName}' w wierszu {rowNo}: {ex.Message}");
+                }
                 return null;
             }
         }
