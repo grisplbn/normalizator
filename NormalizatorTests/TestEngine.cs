@@ -1,6 +1,7 @@
 ﻿using ClosedXML.Excel;
 using System.Collections.Concurrent;
 using System.Data;
+using System.IO;
 using System.Net.Http.Json;
 using System.Threading;
 using Npgsql;
@@ -149,35 +150,117 @@ namespace NormalizatorTests
             }
 
             Console.WriteLine($"{LogTs()} [DB] Analizowanie wyników...");
+            
+            // Sprawdzamy szczegóły wyników przed zapisem
+            var rowsWithResults = results.Where(kvp => kvp.Value != null && kvp.Value.Count > 0).ToList();
+            Console.WriteLine($"{LogTs()} [DB] Wiersze z wynikami: {rowsWithResults.Count} z {results.Count}");
+            
+            if (rowsWithResults.Any())
+            {
+                var sampleRow = rowsWithResults.First();
+                Console.WriteLine($"{LogTs()} [DB] Przykład: wiersz {sampleRow.Key} ma {sampleRow.Value.Count} rekordów");
+                if (sampleRow.Value.Any())
+                {
+                    var firstRecord = sampleRow.Value[0];
+                    Console.WriteLine($"{LogTs()} [DB]   Pierwszy rekord: City={firstRecord.City}, StreetName={firstRecord.StreetName}, PostalCode={firstRecord.PostalCode}");
+                }
+            }
+            
             var maxResults = results.Values.DefaultIfEmpty(new List<ApiResponseAddressDto>()).Max(r => r.Count);
             Console.WriteLine($"{LogTs()} [DB] Maksymalna liczba rekordów na wiersz: {maxResults}");
             
             if (maxResults > 0)
             {
-                var startColumn = sheet.Columns().Count() + 1;
+                // Używamy LastColumnUsed() zamiast Columns().Count() dla dokładniejszego określenia ostatniej kolumny
+                int lastUsedColumn;
+                var lastCol = sheet.LastColumnUsed();
+                if (lastCol != null)
+                {
+                    lastUsedColumn = lastCol.ColumnNumber();
+                }
+                else
+                {
+                    // Jeśli LastColumnUsed() zwraca null, szukamy ostatniej kolumny z danymi w pierwszym wierszu
+                    lastUsedColumn = 0;
+                    for (int col = 1; col <= sheet.Columns().Count(); col++)
+                    {
+                        var cell = sheet.Cell(1, col);
+                        var cellValue = cell.GetString() ?? string.Empty;
+                        if (!string.IsNullOrWhiteSpace(cellValue))
+                        {
+                            lastUsedColumn = col;
+                        }
+                    }
+                    if (lastUsedColumn == 0)
+                    {
+                        lastUsedColumn = sheet.Columns().Count();
+                    }
+                }
+                var startColumn = lastUsedColumn + 1;
+                Console.WriteLine($"{LogTs()} [DB] Ostatnia użyta kolumna: {lastUsedColumn}, start kolumna dla wyników DB: {startColumn}");
                 Console.WriteLine($"{LogTs()} [DB] Tworzenie nagłówków dla {maxResults} wyników na wiersz (start kolumna: {startColumn})...");
                 EnsureDbResultHeaders(sheet, startColumn, maxResults);
                 Console.WriteLine($"{LogTs()} [DB] Nagłówki utworzone");
 
                 Console.WriteLine($"{LogTs()} [DB] Zapis wyników do arkusza...");
                 var totalRecordsWritten = 0;
+                var rowsWithDataWritten = 0;
                 for (int i = 2; i <= rowsNo; i++)
                 {
                     results.TryGetValue(i, out var rowResults);
                     var rowResultsList = rowResults ?? new List<ApiResponseAddressDto>();
-                    WriteDbRowResults(sheet, i, startColumn, rowResultsList);
-                    totalRecordsWritten += rowResultsList.Count;
+                    if (rowResultsList.Count > 0)
+                    {
+                        WriteDbRowResults(sheet, i, startColumn, rowResultsList);
+                        totalRecordsWritten += rowResultsList.Count;
+                        rowsWithDataWritten++;
+                        
+                        // Logujemy pierwsze kilka wierszy z danymi dla weryfikacji
+                        if (rowsWithDataWritten <= 3)
+                        {
+                            Console.WriteLine($"{LogTs()} [DB]   Zapisano wiersz {i}: {rowResultsList.Count} rekordów, start kolumna: {startColumn}");
+                            var firstRec = rowResultsList[0];
+                            Console.WriteLine($"{LogTs()} [DB]     Przykład danych: City='{firstRec.City}', Street='{firstRec.StreetName}'");
+                        }
+                    }
                 }
-                Console.WriteLine($"{LogTs()} [DB] Zapisano łącznie {totalRecordsWritten} rekordów z bazy danych");
+                Console.WriteLine($"{LogTs()} [DB] Zapisano łącznie {totalRecordsWritten} rekordów z bazy danych w {rowsWithDataWritten} wierszach");
+                
+                // Weryfikacja zapisu - sprawdzamy kilka przykładowych komórek
+                if (rowsWithDataWritten > 0)
+                {
+                    var firstRowWithData = results.FirstOrDefault(kvp => kvp.Value != null && kvp.Value.Count > 0);
+                    if (firstRowWithData.Key > 0)
+                    {
+                        var verifyCol = startColumn;
+                        var verifyValue = sheet.Cell(firstRowWithData.Key, verifyCol).GetString() ?? string.Empty;
+                        Console.WriteLine($"{LogTs()} [DB] Weryfikacja: wiersz {firstRowWithData.Key}, kolumna {verifyCol} = '{verifyValue}'");
+                        
+                        // Sprawdzamy też nagłówek
+                        var headerValue = sheet.Cell(1, startColumn).GetString() ?? string.Empty;
+                        Console.WriteLine($"{LogTs()} [DB] Weryfikacja nagłówka: kolumna {startColumn} = '{headerValue}'");
+                    }
+                }
             }
             else
             {
-                Console.WriteLine($"{LogTs()} [DB] Brak wyników do zapisania");
+                Console.WriteLine($"{LogTs()} [DB] ⚠️  Brak wyników do zapisania - sprawdź czy zapytania SQL zwracają dane");
             }
 
             Console.WriteLine($"{LogTs()} [DB] Zapis pliku wynikowego: {dbResultFilePath}");
             workbook.SaveAs(dbResultFilePath);
             Console.WriteLine($"{LogTs()} [DB] Plik zapisany pomyślnie");
+            
+            // Ostatnia weryfikacja - sprawdzamy czy plik został zapisany i ma odpowiedni rozmiar
+            if (File.Exists(dbResultFilePath))
+            {
+                var fileInfo = new FileInfo(dbResultFilePath);
+                Console.WriteLine($"{LogTs()} [DB] Plik zapisany: {fileInfo.Length} bajtów");
+            }
+            else
+            {
+                Console.WriteLine($"{LogTs()} [DB] ⚠️  OSTRZEŻENIE: Plik wynikowy nie istnieje po zapisie!");
+            }
             Console.WriteLine($"{LogTs()} [DB] Zamykanie pliku XLSX...");
             Console.WriteLine($"{LogTs()} [DB] Zakończono: zapisano do {dbResultFilePath}, maks liczba rekordów na wiersz={maxResults}");
         }
@@ -327,20 +410,27 @@ namespace NormalizatorTests
         // Wpisuje zestaw wyników DB w kolejnych blokach kolumn dla danego wiersza.
         private static void WriteDbRowResults(IXLWorksheet sheet, int rowNo, int startColumn, List<ApiResponseAddressDto> results)
         {
+            if (results == null || results.Count == 0)
+            {
+                return;
+            }
+
             var fieldsPerResult = DbResultFieldOrder.Length;
 
             for (int idx = 0; idx < results.Count; idx++)
             {
                 var baseCol = startColumn + idx * fieldsPerResult;
                 var r = results[idx];
-                sheet.Cell(rowNo, baseCol + 0).Value = r.StreetPrefix;
-                sheet.Cell(rowNo, baseCol + 1).Value = r.StreetName;
-                sheet.Cell(rowNo, baseCol + 2).Value = r.BuildingNumber;
-                sheet.Cell(rowNo, baseCol + 3).Value = r.City;
-                sheet.Cell(rowNo, baseCol + 4).Value = r.PostalCode;
-                sheet.Cell(rowNo, baseCol + 5).Value = r.Commune;
-                sheet.Cell(rowNo, baseCol + 6).Value = r.District;
-                sheet.Cell(rowNo, baseCol + 7).Value = r.Province;
+                
+                // Zapisujemy wartości - null zostanie zapisany jako pusta komórka
+                sheet.Cell(rowNo, baseCol + 0).Value = r.StreetPrefix ?? string.Empty;
+                sheet.Cell(rowNo, baseCol + 1).Value = r.StreetName ?? string.Empty;
+                sheet.Cell(rowNo, baseCol + 2).Value = r.BuildingNumber ?? string.Empty;
+                sheet.Cell(rowNo, baseCol + 3).Value = r.City ?? string.Empty;
+                sheet.Cell(rowNo, baseCol + 4).Value = r.PostalCode ?? string.Empty;
+                sheet.Cell(rowNo, baseCol + 5).Value = r.Commune ?? string.Empty;
+                sheet.Cell(rowNo, baseCol + 6).Value = r.District ?? string.Empty;
+                sheet.Cell(rowNo, baseCol + 7).Value = r.Province ?? string.Empty;
             }
         }
 
