@@ -72,6 +72,10 @@ namespace NormalizatorTests
             var indexes = GetColumnIndexes(sheet);
             Console.WriteLine($"{LogTs()} [API] Struktura kolumn przeanalizowana");
 
+            // Optymalizacja: cache'ujemy kolumny EXPECTED dla szybkiego dostępu podczas kolorowania
+            var expectedColumns = GetExpectedColumns(sheet);
+            Console.WriteLine($"{LogTs()} [API] Znaleziono {expectedColumns.Count} kolumn EXPECTED do porównania");
+
             // Optymalizacja: wczytujemy wszystkie dane z Excela do pamięci na początku
             Console.WriteLine($"{LogTs()} [API] Wczytywanie danych z Excela do pamięci...");
             var rowDataCache = new Dictionary<int, RowData>();
@@ -132,7 +136,7 @@ namespace NormalizatorTests
                     writtenCount++;
                 }
 
-                SetBackroundColor(sheet, i);
+                SetBackroundColor(sheet, i, expectedColumns, indexes);
             }
             Console.WriteLine($"{LogTs()} [API] Zapisano {writtenCount} wyników spełniających próg prawdopodobieństwa");
 
@@ -418,38 +422,62 @@ namespace NormalizatorTests
             }
         }
 
-        // Nadaje tło komórkom na podstawie porównania EXPECTED vs RESULT oraz uzupełnia kolumnę IsCorrect.
-        private static void SetBackroundColor(IXLWorksheet sheet, int rowNo)
+        // Pomocnicza klasa do cache'owania kolumn EXPECTED
+        private class ExpectedColumn
         {
+            public int ExpectedIndex { get; set; }
+            public int ResultIndex { get; set; }
+        }
+
+        // Zwraca listę kolumn EXPECTED wraz z odpowiadającymi im kolumnami RESULT
+        private static List<ExpectedColumn> GetExpectedColumns(IXLWorksheet sheet)
+        {
+            var expectedColumns = new List<ExpectedColumn>();
             var columnsNo = sheet.Columns().Count();
 
             for (int i = columnsNo; i > 0; i--)
             {
                 var header = sheet.Cell(1, i).Value.ToString();
-                if (header.Contains("EXPECTED"))
+                if (header != null && header.Contains("EXPECTED", StringComparison.OrdinalIgnoreCase))
                 {
-                    var expectedValue = sheet.Cell(rowNo, i).Value.ToString();
-                    if (expectedValue == "null")
-                        expectedValue = string.Empty;
+                    expectedColumns.Add(new ExpectedColumn { ExpectedIndex = i, ResultIndex = i + 1 });
+                }
+            }
 
-                    var resultValue = sheet.Cell(rowNo, i + 1).Value.ToString();
-                    if (resultValue == "null")
-                        resultValue = string.Empty;
+            return expectedColumns;
+        }
 
-                    var color = XLColor.Red;
+        // Nadaje tło komórkom na podstawie porównania EXPECTED vs RESULT oraz uzupełnia kolumnę IsCorrect.
+        private static void SetBackroundColor(IXLWorksheet sheet, int rowNo, List<ExpectedColumn> expectedColumns, ColumnIndexes indexes)
+        {
+            // Cache'ujemy wartość IsCorrect column - odczytujemy tylko raz
+            var columnsNo = sheet.Columns().Count();
+            var isCorrectCell = sheet.Cell(rowNo, columnsNo);
+            var isCorrectCurrentValue = isCorrectCell.Value.ToString();
+            var needsUpdate = isCorrectCurrentValue == "1" || isCorrectCurrentValue == string.Empty;
 
-                    if (string.Equals(expectedValue, resultValue, StringComparison.CurrentCultureIgnoreCase))
-                    {
-                        color = XLColor.Green;
-                    }
+            // Iterujemy tylko przez znalezione kolumny EXPECTED zamiast przez wszystkie kolumny
+            foreach (var col in expectedColumns)
+            {
+                var expectedValue = sheet.Cell(rowNo, col.ExpectedIndex).Value.ToString();
+                if (expectedValue == "null")
+                    expectedValue = string.Empty;
 
-                    sheet.Cell(rowNo, i + 1).Style.Fill.BackgroundColor = color;
+                var resultValue = sheet.Cell(rowNo, col.ResultIndex).Value.ToString();
+                if (resultValue == "null")
+                    resultValue = string.Empty;
 
-                    var isCorrectCurrentValue = sheet.Cell(rowNo, columnsNo).Value.ToString();
-                    if (isCorrectCurrentValue == "1" || isCorrectCurrentValue == string.Empty)
-                    {
-                        sheet.Cell(rowNo, columnsNo - 1).Value = color == XLColor.Red ? 0 : 1;
-                    }                   
+                // OrdinalIgnoreCase jest szybsze niż CurrentCultureIgnoreCase
+                var isMatch = string.Equals(expectedValue, resultValue, StringComparison.OrdinalIgnoreCase);
+                var color = isMatch ? XLColor.Green : XLColor.Red;
+
+                sheet.Cell(rowNo, col.ResultIndex).Style.Fill.BackgroundColor = color;
+
+                // Aktualizujemy IsCorrect tylko jeśli potrzebne
+                if (needsUpdate)
+                {
+                    sheet.Cell(rowNo, columnsNo - 1).Value = isMatch ? 1 : 0;
+                    needsUpdate = false; // Aktualizujemy tylko raz
                 }
             }
         }
@@ -544,9 +572,9 @@ namespace NormalizatorTests
                     return new NormalizationApiResponseDto();
                 }
 
-                // Używamy zoptymalizowanej deserializacji JSON
-                var jsonString = await response.Content.ReadAsStringAsync();
-                var responseObject = JsonSerializer.Deserialize<NormalizationApiResponseDto>(jsonString, JsonOptions);
+                // Używamy zoptymalizowanej deserializacji JSON - ReadFromJsonAsync jest szybsze niż ReadAsStringAsync + Deserialize
+                using var responseStream = await response.Content.ReadAsStreamAsync();
+                var responseObject = await JsonSerializer.DeserializeAsync<NormalizationApiResponseDto>(responseStream, JsonOptions);
                 
                 if (responseObject is null)
                 {
@@ -750,10 +778,10 @@ namespace NormalizatorTests
             for (int i = columnsNo; i > 0; i--)
             {
                 var header = sheet.Cell(1, i).Value.ToString();
-                if (header.Contains("EXPECTED"))
+                if (header != null && header.Contains("EXPECTED", StringComparison.OrdinalIgnoreCase))
                 {
                     sheet.Column(i).InsertColumnsAfter(1);
-                    sheet.Cell(1, i + 1).Value = header.Replace("EXPECTED", "RESULT");
+                    sheet.Cell(1, i + 1).Value = header.Replace("EXPECTED", "RESULT", StringComparison.OrdinalIgnoreCase);
                 }
             }
 
@@ -779,38 +807,41 @@ namespace NormalizatorTests
             for (int i = columnsNo; i > 0; i--)
             {
                 var header = sheet.Cell(1, i).Value.ToString();
+                if (header == null) continue;
 
-                if (header.Contains("REQUEST"))
+                var headerUpper = header.ToUpperInvariant(); // Konwertujemy raz, używamy wielokrotnie
+
+                if (headerUpper.Contains("REQUEST", StringComparison.Ordinal))
                 {
-                    if (header.Contains("streetN"))
+                    if (headerUpper.Contains("STREETN", StringComparison.Ordinal))
                         result.RequestStreetIndex = i;
-                    if (header.Contains("streetP"))
+                    if (headerUpper.Contains("STREETP", StringComparison.Ordinal))
                         result.RequestPrefixIndex = i;
-                    if (header.Contains("building"))
+                    if (headerUpper.Contains("BUILDING", StringComparison.Ordinal))
                         result.RequestBuildingNoIndex = i;
-                    if (header.Contains("city"))
+                    if (headerUpper.Contains("CITY", StringComparison.Ordinal))
                         result.RequestCityIndex = i;
-                    if (header.Contains("postal"))
+                    if (headerUpper.Contains("POSTAL", StringComparison.Ordinal))
                         result.RequestPostalCodeIndex = i;
                 }
 
-                if (header.Contains("RESULT"))
+                if (headerUpper.Contains("RESULT", StringComparison.Ordinal))
                 {
-                    if (header.Contains("streetN"))
+                    if (headerUpper.Contains("STREETN", StringComparison.Ordinal))
                         result.ResultStreetIndex = i;
-                    if (header.Contains("streetP"))
+                    if (headerUpper.Contains("STREETP", StringComparison.Ordinal))
                         result.ResultPrefixIndex = i;
-                    if (header.Contains("building"))
+                    if (headerUpper.Contains("BUILDING", StringComparison.Ordinal))
                         result.ResultBuildingNoIndex = i;
-                    if (header.Contains("city"))
+                    if (headerUpper.Contains("CITY", StringComparison.Ordinal))
                         result.ResultCityIndex = i;
-                    if (header.Contains("postal"))
+                    if (headerUpper.Contains("POSTAL", StringComparison.Ordinal))
                         result.ResultPostalCodeIndex = i;
-                    if (header.Contains("commune"))
+                    if (headerUpper.Contains("COMMUNE", StringComparison.Ordinal))
                         result.ResultCommuneIndex = i;
-                    if (header.Contains("district"))
+                    if (headerUpper.Contains("DISTRICT", StringComparison.Ordinal))
                         result.ResultDistrictIndex = i;
-                    if (header.Contains("province"))
+                    if (headerUpper.Contains("PROVINCE", StringComparison.Ordinal))
                         result.ResultProvinceIndex = i;
                 }
             }
