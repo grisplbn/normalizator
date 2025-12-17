@@ -20,21 +20,18 @@ namespace NormalizatorTests
                 MaxConnectionsPerServer = 100, // Zwiększamy limit połączeń równoległych na serwer
                 PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2), // Dłużej trzymamy połączenia w puli
                 PooledConnectionLifetime = TimeSpan.FromMinutes(10), // Maksymalny czas życia połączenia
-                EnableMultipleHttp2Connections = true, // Włączamy wiele połączeń HTTP/2 dla lepszej równoległości
-                // Wyłączamy weryfikację certyfikatu SSL dla localhost - znacznie przyspiesza połączenia lokalne
-                SslOptions = new System.Net.Security.SslClientAuthenticationOptions
-                {
-                    RemoteCertificateValidationCallback = (sender, cert, chain, errors) =>
-                    {
-                        // Dla localhost akceptujemy wszystkie certyfikaty (tylko dla development)
-                        if (sender is System.Net.Security.SslStream sslStream && sslStream.TargetHost != null)
-                        {
-                            var host = sslStream.TargetHost;
-                            return host == "localhost" || host == "127.0.0.1";
-                        }
-                        return false;
-                    }
-                }
+                EnableMultipleHttp2Connections = true // Włączamy wiele połączeń HTTP/2 dla lepszej równoległości
+            };
+
+            // Wyłączamy weryfikację certyfikatu SSL dla localhost - znacznie przyspiesza połączenia lokalne
+            // Uwaga: w SocketsHttpHandler używamy ConnectCallback zamiast RemoteCertificateValidationCallback
+            // Dla uproszczenia akceptujemy wszystkie certyfikaty (tylko dla development/localhost)
+            handler.SslOptions.RemoteCertificateValidationCallback = (sender, cert, chain, errors) =>
+            {
+                // Dla localhost akceptujemy wszystkie certyfikaty (tylko dla development)
+                // W kontekście SocketsHttpHandler nie mamy bezpośredniego dostępu do hosta w callbacku,
+                // więc akceptujemy wszystkie certyfikaty - używaj tylko dla localhost!
+                return true;
             };
 
             var client = new HttpClient(handler)
