@@ -64,9 +64,8 @@ namespace NormalizatorTests
         {
             Console.WriteLine($"{LogTs()} [BENCHMARK] Rozpoczynam benchmark API...");
             Console.WriteLine($"{LogTs()} [BENCHMARK] Testuję różne poziomy równoległości:");
-            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Poziomy 1-10: {testRequests / 4} próbek (szybki test)");
-            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Poziomy 15-30: {testRequests} próbek");
-            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Poziomy 50-100: {testRequests * 2} próbek (większa precyzja statystyczna)");
+            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Poziomy 1-5: {testRequests / 2} próbek (50%)");
+            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Poziomy 6+: {testRequests} próbek (100%)");
             Console.WriteLine($"{LogTs()} [BENCHMARK] To może zająć kilka minut, proszę czekać...");
             
             // Testowe dane do wysłania
@@ -87,19 +86,14 @@ namespace NormalizatorTests
             {
                 // Określamy liczbę próbek w zależności od poziomu równoległości
                 int actualTestRequests;
-                if (level <= 10)
+                if (level <= 5)
                 {
-                    // Dla niskich poziomów (1-10) używamy mniejszej liczby próbek dla szybkości
-                    actualTestRequests = testRequests / 4; // np. 50 próbek jeśli testRequests = 200
-                }
-                else if (level >= 50)
-                {
-                    // Dla wyższych poziomów (50+) zwiększamy liczbę próbek dla lepszej precyzji statystycznej
-                    actualTestRequests = testRequests * 2;
+                    // Dla poziomów 1-5 używamy 50% próbek (100 próbek jeśli testRequests = 200)
+                    actualTestRequests = testRequests / 2;
                 }
                 else
                 {
-                    // Dla średnich poziomów (15-30) używamy standardowej liczby próbek
+                    // Dla poziomów 6+ używamy 100% próbek (200 próbek jeśli testRequests = 200)
                     actualTestRequests = testRequests;
                 }
                 
@@ -472,19 +466,14 @@ namespace NormalizatorTests
             {
                 // Określamy liczbę próbek w zależności od poziomu równoległości (tak samo jak w I iteracji)
                 int actualTestRequests;
-                if (level <= 10)
+                if (level <= 5)
                 {
-                    // Dla niskich poziomów (1-10) używamy mniejszej liczby próbek dla szybkości
-                    actualTestRequests = baseTestRequests / 4;
-                }
-                else if (level >= 50)
-                {
-                    // Dla wyższych poziomów (50+) zwiększamy liczbę próbek dla lepszej precyzji statystycznej
-                    actualTestRequests = baseTestRequests * 2;
+                    // Dla poziomów 1-5 używamy 50% próbek (100 próbek jeśli baseTestRequests = 200)
+                    actualTestRequests = baseTestRequests / 2;
                 }
                 else
                 {
-                    // Dla średnich poziomów (15-30) używamy standardowej liczby próbek
+                    // Dla poziomów 6+ używamy 100% próbek (200 próbek jeśli baseTestRequests = 200)
                     actualTestRequests = baseTestRequests;
                 }
                 
