@@ -123,11 +123,11 @@ namespace NormalizatorTests
             // Zapisz wyniki pierwszej iteracji
             var firstIterationResults = new Dictionary<int, BenchmarkResult>(results);
             
-            // Druga iteracja - szczegółowe przeszukanie wokół najbardziej obiecujących wartości
+            // Druga iteracja - szczegółowe testowanie 5 najbardziej efektywnych poziomów (najszybsze dla 100k requestów)
             Console.WriteLine($"{LogTs()} [BENCHMARK] ");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] ========== DRUGA ITERACJA - SZCZEGÓŁOWA ANALIZA ==========");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] ========== DRUGA ITERACJA - SZCZEGÓŁOWA ANALIZA TOP 5 ==========");
             
-            var secondIterationResults = await RunDetailedBenchmark(apiUrl, testData, optimal, firstIterationResults, testRequests);
+            var secondIterationResults = await RunDetailedBenchmarkTop5(apiUrl, testData, firstIterationResults);
             
             // Łączymy wyniki z obu iteracji
             foreach (var kvp in secondIterationResults)
@@ -327,164 +327,51 @@ namespace NormalizatorTests
                 return $"{seconds}s";
         }
 
-        // Druga iteracja benchmarka - szczegółowe przeszukanie wokół najbardziej obiecujących wartości
-        private static async Task<Dictionary<int, BenchmarkResult>> RunDetailedBenchmark(
+        // Druga iteracja benchmarka - szczegółowe testowanie 5 najbardziej efektywnych poziomów (najszybsze dla 100k requestów)
+        private static async Task<Dictionary<int, BenchmarkResult>> RunDetailedBenchmarkTop5(
             string apiUrl, 
             RowData testData, 
-            (BenchmarkResult BestThroughput, BenchmarkResult BestLatency, int Recommended) optimal,
-            Dictionary<int, BenchmarkResult> firstIterationResults,
-            int baseTestRequests)
+            Dictionary<int, BenchmarkResult> firstIterationResults)
         {
             var detailedResults = new Dictionary<int, BenchmarkResult>();
             
-            // Określamy zakres do dokładniejszego przeszukania
-            var candidates = new HashSet<int>();
-            
-            // Dodajemy rekomendowaną wartość i wartości wokół niej
-            candidates.Add(optimal.Recommended);
-            if (optimal.Recommended > 5) candidates.Add(optimal.Recommended - 5);
-            if (optimal.Recommended > 3) candidates.Add(optimal.Recommended - 3);
-            if (optimal.Recommended > 1) candidates.Add(optimal.Recommended - 1);
-            candidates.Add(optimal.Recommended + 1);
-            if (optimal.Recommended + 3 <= 200) candidates.Add(optimal.Recommended + 3);
-            if (optimal.Recommended + 5 <= 200) candidates.Add(optimal.Recommended + 5);
-            
-            // Funkcja pomocnicza do obliczania efektywności
-            static double CalculateEfficiency(BenchmarkResult r) => 
-                r.AverageLatencyMs > 0 ? (r.RequestsPerSecond / r.AverageLatencyMs) * 1000 : 0;
+            // Funkcja pomocnicza do obliczania czasu dla 100k requestów (w sekundach)
+            static double GetTimeFor100K(BenchmarkResult r)
+            {
+                if (r.RequestsPerSecond <= 0) return double.MaxValue;
+                return 100000.0 / r.RequestsPerSecond;
+            }
 
-            // Znajdź najlepszą efektywność z pierwszej iteracji
-            var bestEfficiencyResult = firstIterationResults.Values
-                .Where(r => r.SuccessCount > 0)
-                .OrderByDescending(r => CalculateEfficiency(r))
-                .FirstOrDefault();
-            
-            // Dodajemy wartości wokół najlepszej efektywności (jeśli różni się od rekomendowanej)
-            if (bestEfficiencyResult != null && bestEfficiencyResult.Parallelism != optimal.Recommended)
+            // Wybieramy 5 najbardziej efektywnych poziomów pod względem czasu dla 100k requestów (najszybsze)
+            var top5Levels = firstIterationResults.Values
+                .Where(r => r.SuccessCount > 0 && r.ErrorRate <= 10.0) // Filtrujemy tylko poprawne wyniki z rozsądną liczbą błędów
+                .OrderBy(r => GetTimeFor100K(r)) // Sortujemy po czasie dla 100k requestów (najszybsze pierwsze)
+                .Take(5)
+                .Select(r => r.Parallelism)
+                .ToList();
+
+            if (!top5Levels.Any())
             {
-                candidates.Add(bestEfficiencyResult.Parallelism);
-                if (bestEfficiencyResult.Parallelism > 1) candidates.Add(bestEfficiencyResult.Parallelism - 1);
-                candidates.Add(bestEfficiencyResult.Parallelism + 1);
-            }
-            
-            // Dodajemy wartości wokół najlepszej przepustowości (jeśli różni się od rekomendowanej i od najlepszej efektywności)
-            if (optimal.BestThroughput.Parallelism != optimal.Recommended && 
-                optimal.BestThroughput.Parallelism != (bestEfficiencyResult?.Parallelism ?? -1))
-            {
-                candidates.Add(optimal.BestThroughput.Parallelism);
-                if (optimal.BestThroughput.Parallelism > 1) candidates.Add(optimal.BestThroughput.Parallelism - 1);
-                candidates.Add(optimal.BestThroughput.Parallelism + 1);
-            }
-            
-            // Dodajemy wartości wokół najlepszego opóźnienia (jeśli różni się od rekomendowanej i od innych)
-            if (optimal.BestLatency.Parallelism != optimal.Recommended && 
-                optimal.BestLatency.Parallelism != optimal.BestThroughput.Parallelism &&
-                optimal.BestLatency.Parallelism != (bestEfficiencyResult?.Parallelism ?? -1))
-            {
-                candidates.Add(optimal.BestLatency.Parallelism);
-                if (optimal.BestLatency.Parallelism > 1) candidates.Add(optimal.BestLatency.Parallelism - 1);
-                candidates.Add(optimal.BestLatency.Parallelism + 1);
-            }
-            
-            // Filtrujemy tylko wartości, które nie były testowane w pierwszej iteracji
-            var newValues = candidates.Where(v => v > 0 && !firstIterationResults.ContainsKey(v)).OrderBy(v => v).ToList();
-            
-            if (!newValues.Any())
-            {
-                Console.WriteLine($"{LogTs()} [BENCHMARK] Wszystkie wartości brzegowe zostały już przetestowane w pierwszej iteracji.");
+                Console.WriteLine($"{LogTs()} [BENCHMARK] ⚠️  Nie znaleziono odpowiednich poziomów do szczegółowej analizy.");
                 return detailedResults;
             }
-            
-            // Określamy zakres (od najniższej do najwyższej nowej wartości)
-            var minValue = newValues.Min();
-            var maxValue = newValues.Max();
-            var range = maxValue - minValue;
-            
-            // Jeśli zakres jest duży (>20), dodajemy 5 wartości równomiernie rozłożonych
-            if (range > 20)
-            {
-                var step = range / 6.0; // 5 wartości + 2 brzegowe = 7 punktów
-                for (int i = 1; i <= 5; i++)
-                {
-                    var value = (int)(minValue + step * i);
-                    if (value > 0 && value <= 200 && !firstIterationResults.ContainsKey(value) && !newValues.Contains(value))
-                    {
-                        newValues.Add(value);
-                    }
-                }
-                newValues = newValues.OrderBy(v => v).ToList();
-            }
-            else if (range > 5)
-            {
-                // Jeśli zakres jest średni, dodajemy wartości co 1-2 jednostki między brzegowymi
-                var step = range > 10 ? 2 : 1;
-                var valuesToAdd = new List<int>();
-                for (int val = minValue + step; val < maxValue; val += step)
-                {
-                    if (!firstIterationResults.ContainsKey(val) && !newValues.Contains(val))
-                    {
-                        valuesToAdd.Add(val);
-                    }
-                }
-                // Ograniczamy do maksymalnie 5 dodatkowych wartości
-                if (valuesToAdd.Count > 5)
-                {
-                    var step2 = valuesToAdd.Count / 5.0;
-                    var selected = new List<int>();
-                    for (int i = 0; i < 5; i++)
-                    {
-                        var idx = (int)(step2 * i);
-                        if (idx < valuesToAdd.Count) selected.Add(valuesToAdd[idx]);
-                    }
-                    valuesToAdd = selected;
-                }
-                newValues.AddRange(valuesToAdd);
-                newValues = newValues.OrderBy(v => v).ToList();
-            }
-            
-            // Ograniczamy do maksymalnie 12 nowych wartości (dla rozsądnego czasu wykonania)
-            if (newValues.Count > 12)
-            {
-                // Wybieramy równomiernie rozłożone wartości, priorytetyzując brzegowe
-                var selected = new List<int> { newValues.First() };
-                var step = (newValues.Count - 2) / 10.0;
-                for (int i = 1; i < 11; i++)
-                {
-                    var idx = 1 + (int)(step * i);
-                    if (idx < newValues.Count - 1) selected.Add(newValues[idx]);
-                }
-                selected.Add(newValues.Last());
-                newValues = selected.Distinct().OrderBy(v => v).ToList();
-            }
-            
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Testuję {newValues.Count} dodatkowych wartości brzegowych i pomiędzy: {string.Join(", ", newValues)}");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Zakres szczegółowej analizy: {minValue} - {maxValue}");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Rekomendowana wartość z I iteracji: {optimal.Recommended}");
+
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Wybrano 5 najbardziej efektywnych poziomów (najszybsze dla 100k requestów): {string.Join(", ", top5Levels)}");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Dla każdego poziomu wykonam szczegółowy test z 1000 requestami");
             Console.WriteLine($"{LogTs()} [BENCHMARK] ");
-            
-            foreach (var level in newValues)
+
+            const int detailedTestRequests = 1000;
+
+            foreach (var level in top5Levels)
             {
-                // Określamy liczbę próbek w zależności od poziomu równoległości (tak samo jak w I iteracji)
-                int actualTestRequests;
-                if (level <= 5)
-                {
-                    // Dla poziomów 1-5 używamy 50% próbek (100 próbek jeśli baseTestRequests = 200)
-                    actualTestRequests = baseTestRequests / 2;
-                }
-                else
-                {
-                    // Dla poziomów 6+ używamy 100% próbek (200 próbek jeśli baseTestRequests = 200)
-                    actualTestRequests = baseTestRequests;
-                }
-                
-                Console.WriteLine($"{LogTs()} [BENCHMARK] [II] Testuję równoległość = {level} ({actualTestRequests} próbek)...");
-                var result = await BenchmarkLevel(apiUrl, testData, level, actualTestRequests);
+                Console.WriteLine($"{LogTs()} [BENCHMARK] [II] Testuję równoległość = {level} ({detailedTestRequests} próbek)...");
+                var result = await BenchmarkLevel(apiUrl, testData, level, detailedTestRequests);
                 detailedResults[level] = result;
                 
                 var statusIndicator = result.ErrorRate > 10 ? "⚠️" : result.ErrorRate > 0 ? "⚡" : "✓";
                 var totalTested = result.SuccessCount + result.ErrorCount;
                 
-                // Oblicz czas dla 100k requestów - użyj funkcji z zakresu zewnętrznego
+                // Oblicz czas dla 100k requestów
                 var timeFor100K = FormatTimeFor100KStatic(result.RequestsPerSecond);
                 Console.WriteLine($"{LogTs()} [BENCHMARK] [II]   {statusIndicator} Wynik: {result.RequestsPerSecond:F2} req/s, średni czas: {result.AverageLatencyMs:F0}ms, sukces: {result.SuccessCount}/{totalTested} ({100.0 - result.ErrorRate:F1}%), 100k req: ~{timeFor100K}");
                 
@@ -499,7 +386,7 @@ namespace NormalizatorTests
                 }
             }
             
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Druga iteracja zakończona - dodano {detailedResults.Count} nowych wyników");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Druga iteracja zakończona - przetestowano {detailedResults.Count} poziomów z 1000 requestami każdy");
             Console.WriteLine($"{LogTs()} [BENCHMARK] ");
             
             return detailedResults;
