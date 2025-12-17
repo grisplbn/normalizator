@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Data;
 using System.IO;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Threading;
 using Npgsql;
 
@@ -16,7 +17,14 @@ namespace NormalizatorTests
             var handler = new HttpClientHandler
             {
                 MaxConnectionsPerServer = 100, // Zwiększamy limit połączeń równoległych na serwer
-                UseCookies = false // Wyłączamy cookies jeśli nie są potrzebne dla lepszej wydajności
+                UseCookies = false, // Wyłączamy cookies jeśli nie są potrzebne dla lepszej wydajności
+                AutomaticDecompression = System.Net.DecompressionMethods.All, // Automatyczna dekompresja gzip/deflate/brotli
+                // Wyłączamy weryfikację certyfikatu SSL dla localhost - znacznie przyspiesza połączenia lokalne
+                ServerCertificateCustomValidationCallback = (message, cert, chain, errors) =>
+                {
+                    // Dla localhost akceptujemy wszystkie certyfikaty (tylko dla development)
+                    return message.RequestUri?.Host == "localhost" || message.RequestUri?.Host == "127.0.0.1";
+                }
             };
 
             var client = new HttpClient(handler)
@@ -24,13 +32,23 @@ namespace NormalizatorTests
                 Timeout = TimeSpan.FromMinutes(5) // Timeout 5 minut dla długich zapytań
             };
 
-            // HttpClient automatycznie zarządza nagłówkiem Connection i keep-alive
-            // Nie trzeba go ustawiać ręcznie - MaxConnectionsPerServer w handlerze wystarczy
+            // Wymuszamy kompresję w nagłówkach requestów
+            client.DefaultRequestHeaders.Add("Accept-Encoding", "gzip, deflate, br");
             
             return client;
         });
 
         private static HttpClient SharedHttpClient => _sharedHttpClient.Value;
+
+        // Współdzielone ustawienia JSON dla lepszej wydajności serializacji/deserializacji
+        private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true, // Case-insensitive dla większej elastyczności
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.Never,
+            WriteIndented = false, // Bez formatowania - mniejsze JSON i szybsza serializacja
+            AllowTrailingCommas = true,
+            ReadCommentHandling = JsonCommentHandling.Skip
+        };
 
         // Główny przebieg testów dla API: odczyt danych z Excela, wywołanie API,
         // zapis wyników i wizualne oznaczenie poprawności.
@@ -38,6 +56,7 @@ namespace NormalizatorTests
         {
             Console.WriteLine($"{LogTs()} [API] Otwieranie pliku XLSX: {originalFilePath}");
             using var workbook = new XLWorkbook(originalFilePath);
+            workbook.CalculateMode = XLCalculateMode.Manual; // Wyłączamy auto-kalkulację dla lepszej wydajności
             var sheet = workbook.Worksheet(1);
             Console.WriteLine($"{LogTs()} [API] Plik XLSX otwarty pomyślnie");
 
@@ -128,6 +147,7 @@ namespace NormalizatorTests
         {
             Console.WriteLine($"{LogTs()} [DB] Otwieranie pliku XLSX: {originalFilePath}");
             using var workbook = new XLWorkbook(originalFilePath);
+            workbook.CalculateMode = XLCalculateMode.Manual; // Wyłączamy auto-kalkulację dla lepszej wydajności
             var sheet = workbook.Worksheet(1);
             Console.WriteLine($"{LogTs()} [DB] Plik XLSX otwarty pomyślnie");
 
@@ -514,15 +534,20 @@ namespace NormalizatorTests
                     PostalCode = rowData.PostalCode
                 };
 
-                // Używamy współdzielonego HttpClient zamiast tworzenia nowego dla każdego zapytania
-                var response = await SharedHttpClient.PostAsJsonAsync(endpoint, body);
+                // Używamy współdzielonego HttpClient z optymalizowanymi ustawieniami JSON
+                var requestContent = JsonContent.Create(body, options: JsonOptions);
+                var response = await SharedHttpClient.PostAsync(endpoint, requestContent);
+                
                 if (!response.IsSuccessStatusCode)
                 {
                     // Zwracamy pustą odpowiedź, aby przetwarzanie innych wierszy mogło trwać dalej.
                     return new NormalizationApiResponseDto();
                 }
 
-                var responseObject = await response.Content.ReadFromJsonAsync<NormalizationApiResponseDto>();
+                // Używamy zoptymalizowanej deserializacji JSON
+                var jsonString = await response.Content.ReadAsStringAsync();
+                var responseObject = JsonSerializer.Deserialize<NormalizationApiResponseDto>(jsonString, JsonOptions);
+                
                 if (responseObject is null)
                 {
                     return new NormalizationApiResponseDto();
