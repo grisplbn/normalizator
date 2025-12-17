@@ -1,8 +1,20 @@
 ﻿using Microsoft.Extensions.Configuration;
 using NormalizatorTests;
 
+// Ustawiamy bazową ścieżkę na katalog projektu, nie na katalog output
+var basePath = AppContext.BaseDirectory;
+// Jeśli jesteśmy w bin/Debug/net8.0, cofamy się do katalogu projektu
+if (basePath.Contains("bin" + Path.DirectorySeparatorChar + "Debug") || basePath.Contains("bin" + Path.DirectorySeparatorChar + "Release"))
+{
+    var projectDir = Directory.GetParent(basePath)?.Parent?.Parent?.FullName;
+    if (projectDir != null && Directory.Exists(projectDir))
+    {
+        basePath = projectDir;
+    }
+}
+
 var config = new ConfigurationBuilder()
-    .SetBasePath(Directory.GetCurrentDirectory())
+    .SetBasePath(basePath)
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
     .Build();
 
