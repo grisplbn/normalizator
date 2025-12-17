@@ -14,22 +14,33 @@ namespace NormalizatorTests
         // Współdzielony HttpClient dla wszystkich zapytań API (thread-safe)
         private static readonly Lazy<HttpClient> _sharedHttpClient = new Lazy<HttpClient>(() =>
         {
-            var handler = new HttpClientHandler
+            // Używamy SocketsHttpHandler dla lepszej wydajności i wsparcia HTTP/2
+            var handler = new System.Net.Http.SocketsHttpHandler
             {
                 MaxConnectionsPerServer = 100, // Zwiększamy limit połączeń równoległych na serwer
-                UseCookies = false, // Wyłączamy cookies jeśli nie są potrzebne dla lepszej wydajności
-                AutomaticDecompression = System.Net.DecompressionMethods.All, // Automatyczna dekompresja gzip/deflate/brotli
+                PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2), // Dłużej trzymamy połączenia w puli
+                PooledConnectionLifetime = TimeSpan.FromMinutes(10), // Maksymalny czas życia połączenia
+                EnableMultipleHttp2Connections = true, // Włączamy wiele połączeń HTTP/2 dla lepszej równoległości
                 // Wyłączamy weryfikację certyfikatu SSL dla localhost - znacznie przyspiesza połączenia lokalne
-                ServerCertificateCustomValidationCallback = (message, cert, chain, errors) =>
+                SslOptions = new System.Net.Security.SslClientAuthenticationOptions
                 {
-                    // Dla localhost akceptujemy wszystkie certyfikaty (tylko dla development)
-                    return message.RequestUri?.Host == "localhost" || message.RequestUri?.Host == "127.0.0.1";
+                    RemoteCertificateValidationCallback = (sender, cert, chain, errors) =>
+                    {
+                        // Dla localhost akceptujemy wszystkie certyfikaty (tylko dla development)
+                        if (sender is System.Net.Security.SslStream sslStream && sslStream.TargetHost != null)
+                        {
+                            var host = sslStream.TargetHost;
+                            return host == "localhost" || host == "127.0.0.1";
+                        }
+                        return false;
+                    }
                 }
             };
 
             var client = new HttpClient(handler)
             {
-                Timeout = TimeSpan.FromMinutes(5) // Timeout 5 minut dla długich zapytań
+                Timeout = TimeSpan.FromMinutes(5), // Timeout 5 minut dla długich zapytań
+                DefaultRequestVersion = new Version(2, 0) // Wymuszamy HTTP/2 jeśli dostępne
             };
 
             // Wymuszamy kompresję w nagłówkach requestów
@@ -587,7 +598,8 @@ namespace NormalizatorTests
 
                 // Używamy współdzielonego HttpClient z optymalizowanymi ustawieniami JSON
                 var requestContent = JsonContent.Create(body, options: JsonOptions);
-                var response = await SharedHttpClient.PostAsync(endpoint, requestContent);
+                // Używamy ResponseHeadersRead aby rozpocząć deserializację jak najszybciej
+                var response = await SharedHttpClient.PostAsync(endpoint, requestContent, System.Net.Http.HttpCompletionOption.ResponseHeadersRead);
                 
                 if (!response.IsSuccessStatusCode)
                 {
