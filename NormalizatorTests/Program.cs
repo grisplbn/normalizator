@@ -1,20 +1,48 @@
 ﻿using Microsoft.Extensions.Configuration;
 using NormalizatorTests;
 
-// Ustawiamy bazową ścieżkę na katalog projektu, nie na katalog output
+// Ustawiamy bazową ścieżkę - najpierw sprawdzamy katalog output, potem katalog projektu
 var basePath = AppContext.BaseDirectory;
-// Jeśli jesteśmy w bin/Debug/net8.0, cofamy się do katalogu projektu
-if (basePath.Contains("bin" + Path.DirectorySeparatorChar + "Debug") || basePath.Contains("bin" + Path.DirectorySeparatorChar + "Release"))
+var configBuilder = new ConfigurationBuilder();
+
+// Sprawdzamy czy appsettings.json jest w katalogu output
+var appsettingsInOutput = Path.Combine(basePath, "appsettings.json");
+if (File.Exists(appsettingsInOutput))
 {
-    var projectDir = Directory.GetParent(basePath)?.Parent?.Parent?.FullName;
-    if (projectDir != null && Directory.Exists(projectDir))
+    // Plik jest w katalogu output - używamy go
+    configBuilder.SetBasePath(basePath);
+}
+else
+{
+    // Plik nie jest w katalogu output - szukamy w katalogu projektu
+    // Jeśli jesteśmy w bin/Debug/net8.0 lub bin/Release/net8.0, cofamy się do katalogu projektu
+    var projectDir = basePath;
+    if (basePath.Contains(Path.Combine("bin", "Debug")) || basePath.Contains(Path.Combine("bin", "Release")))
     {
-        basePath = projectDir;
+        var parent = Directory.GetParent(basePath); // net8.0
+        parent = parent?.Parent; // Debug/Release
+        parent = parent?.Parent; // bin
+        parent = parent?.Parent; // NormalizatorTests (katalog projektu)
+        if (parent != null && Directory.Exists(parent.FullName))
+        {
+            projectDir = parent.FullName;
+        }
+    }
+    
+    // Sprawdzamy czy plik istnieje w katalogu projektu
+    var appsettingsInProject = Path.Combine(projectDir, "appsettings.json");
+    if (File.Exists(appsettingsInProject))
+    {
+        configBuilder.SetBasePath(projectDir);
+    }
+    else
+    {
+        // Jeśli nadal nie znaleźliśmy, używamy katalogu output jako fallback
+        configBuilder.SetBasePath(basePath);
     }
 }
 
-var config = new ConfigurationBuilder()
-    .SetBasePath(basePath)
+var config = configBuilder
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
     .Build();
 
