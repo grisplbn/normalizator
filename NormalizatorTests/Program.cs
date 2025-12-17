@@ -59,7 +59,7 @@ var enableDb = config.GetValue<bool>("EnableDb", true);
 if (runBenchmark && !string.IsNullOrWhiteSpace(apiUrl))
 {
     Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [MAIN] Wykonywanie benchmarka API...");
-    var recommendedParallelism = await TestEngine.RunBenchmark(apiUrl!, benchmarkRequests);
+    var recommendedParallelism = await BenchmarkEngine.RunBenchmark(apiUrl!, benchmarkRequests);
     
     if (recommendedParallelism != maxParallelRequests)
     {
