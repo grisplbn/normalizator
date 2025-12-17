@@ -10,8 +10,27 @@ var originalFilePath = config["OriginalFilePath"];
 var resultFilePath = config["ResultFilePath"];
 var apiUrl = config["ApiUrl"];
 var maxParallelRequests = config.GetValue<int>("MaxParallelRequests", 10);
+var runBenchmark = config.GetValue<bool>("RunBenchmark", false);
+var benchmarkRequests = config.GetValue<int>("BenchmarkRequests", 50);
 var enableApi = config.GetValue<bool>("EnableApi", true);
 var enableDb = config.GetValue<bool>("EnableDb", true);
+
+// Uruchomienie benchmarka jeśli włączony
+if (runBenchmark && !string.IsNullOrWhiteSpace(apiUrl))
+{
+    Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [MAIN] Wykonywanie benchmarka API...");
+    var recommendedParallelism = await TestEngine.RunBenchmark(apiUrl!, benchmarkRequests);
+    
+    if (recommendedParallelism != maxParallelRequests)
+    {
+        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [MAIN] ⚠️  Obecna wartość MaxParallelRequests ({maxParallelRequests}) różni się od rekomendowanej ({recommendedParallelism})");
+        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [MAIN] Rozważ zmianę w appsettings.json:");
+        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [MAIN]   \"MaxParallelRequests\": {recommendedParallelism}");
+    }
+    
+    Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [MAIN] Kontynuowanie z MaxParallelRequests = {maxParallelRequests}");
+    Console.WriteLine();
+}
 
 // Konfiguracja testu bazy danych (opcjonalna)
 var dbResultFilePath = config["DbResultFilePath"];

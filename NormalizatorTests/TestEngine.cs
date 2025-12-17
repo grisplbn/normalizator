@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using System.Data;
 using System.IO;
+using System.Linq;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Threading;
@@ -57,6 +58,114 @@ namespace NormalizatorTests
             AllowTrailingCommas = true,
             ReadCommentHandling = JsonCommentHandling.Skip
         };
+
+        // Benchmark API - testuje różne poziomy równoległości aby znaleźć optymalną wartość
+        public static async Task<int> RunBenchmark(string apiUrl, int testRequests = 50)
+        {
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Rozpoczynam benchmark API...");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Testuję {testRequests} requestów dla różnych poziomów równoległości");
+            
+            // Testowe dane do wysłania
+            var testData = new RowData
+            {
+                StreetName = "Test",
+                Prefix = "",
+                BuildingNo = "1",
+                City = "Warszawa",
+                PostalCode = "00-001"
+            };
+
+            var levels = new[] { 5, 10, 15, 20, 30, 50, 75, 100 };
+            var results = new Dictionary<int, BenchmarkResult>();
+
+            foreach (var level in levels)
+            {
+                Console.WriteLine($"{LogTs()} [BENCHMARK] Testuję równoległość = {level}...");
+                var result = await BenchmarkLevel(apiUrl, testData, level, testRequests);
+                results[level] = result;
+                Console.WriteLine($"{LogTs()} [BENCHMARK]   Wynik: {result.RequestsPerSecond:F2} req/s, średni czas: {result.AverageLatencyMs:F0}ms");
+            }
+
+            // Znajdź optymalny poziom (najwyższa przepustowość z rozsądnym opóźnieniem)
+            var optimal = FindOptimalParallelism(results);
+            
+            Console.WriteLine($"{LogTs()} [BENCHMARK] ========== WYNIKI BENCHMARKA ==========");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Najlepsza przepustowość: {optimal.BestThroughput.RequestsPerSecond:F2} req/s przy {optimal.BestThroughput.Parallelism} równoległych requestach");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Najlepsze opóźnienie: {optimal.BestLatency.AverageLatencyMs:F0}ms przy {optimal.BestLatency.Parallelism} równoległych requestach");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] REKOMENDOWANA wartość MaxParallelRequests: {optimal.Recommended}");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwana przepustowość: {results[optimal.Recommended].RequestsPerSecond:F2} req/s");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwane średnie opóźnienie: {results[optimal.Recommended].AverageLatencyMs:F0}ms");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] ========================================");
+
+            return optimal.Recommended;
+        }
+
+        private static async Task<BenchmarkResult> BenchmarkLevel(string apiUrl, RowData testData, int parallelism, int totalRequests)
+        {
+            var semaphore = new SemaphoreSlim(parallelism);
+            var tasks = new List<Task<long>>();
+            var startTime = DateTime.UtcNow;
+
+            for (int i = 0; i < totalRequests; i++)
+            {
+                tasks.Add(BenchmarkSingleRequest(apiUrl, testData, semaphore));
+            }
+
+            var latencies = await Task.WhenAll(tasks);
+            var endTime = DateTime.UtcNow;
+            var duration = (endTime - startTime).TotalSeconds;
+            var requestsPerSecond = totalRequests / duration;
+            var averageLatency = latencies.Average();
+
+            return new BenchmarkResult
+            {
+                Parallelism = parallelism,
+                RequestsPerSecond = requestsPerSecond,
+                AverageLatencyMs = averageLatency
+            };
+        }
+
+        private static async Task<long> BenchmarkSingleRequest(string apiUrl, RowData testData, SemaphoreSlim semaphore)
+        {
+            await semaphore.WaitAsync();
+            try
+            {
+                var startTime = DateTime.UtcNow;
+                await GetResultForRow(testData, apiUrl);
+                var elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds;
+                return (long)elapsed;
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        }
+
+        private static (BenchmarkResult BestThroughput, BenchmarkResult BestLatency, int Recommended) FindOptimalParallelism(Dictionary<int, BenchmarkResult> results)
+        {
+            var bestThroughput = results.Values.OrderByDescending(r => r.RequestsPerSecond).First();
+            var bestLatency = results.Values.OrderBy(r => r.AverageLatencyMs).First();
+
+            // Rekomendacja: wybierz poziom który ma >90% najlepszej przepustowości i <150% najlepszego opóźnienia
+            var thresholdThroughput = bestThroughput.RequestsPerSecond * 0.90;
+            var thresholdLatency = bestLatency.AverageLatencyMs * 1.50;
+
+            var candidates = results.Values
+                .Where(r => r.RequestsPerSecond >= thresholdThroughput && r.AverageLatencyMs <= thresholdLatency)
+                .OrderByDescending(r => r.RequestsPerSecond)
+                .ThenBy(r => r.Parallelism);
+
+            var recommended = candidates.FirstOrDefault() ?? bestThroughput;
+
+            return (bestThroughput, bestLatency, recommended.Parallelism);
+        }
+
+        private class BenchmarkResult
+        {
+            public int Parallelism { get; set; }
+            public double RequestsPerSecond { get; set; }
+            public double AverageLatencyMs { get; set; }
+        }
 
         // Główny przebieg testów dla API: odczyt danych z Excela, wywołanie API,
         // zapis wyników i wizualne oznaczenie poprawności.
