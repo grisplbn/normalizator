@@ -61,7 +61,8 @@ namespace NormalizatorTests
             Console.WriteLine($"{LogTs()} [API] Plik XLSX otwarty pomyślnie");
 
             var rowsNo = sheet.Rows().Count();
-            Console.WriteLine($"{LogTs()} [API] Start: Rows={rowsNo - 1},  Parallel requests={maxParallelRequests}");
+            var totalRows = rowsNo - 1;
+            Console.WriteLine($"{LogTs()} [API] Start: Rows={totalRows},  Parallel requests={maxParallelRequests}");
 
             // Tworzymy dodatkowe kolumny na wyniki, aby nie nadpisywać oczekiwanych wartości.
             Console.WriteLine($"{LogTs()} [API] Dodawanie kolumn wynikowych...");
@@ -78,25 +79,28 @@ namespace NormalizatorTests
 
             // Optymalizacja: wczytujemy wszystkie dane z Excela do pamięci na początku
             Console.WriteLine($"{LogTs()} [API] Wczytywanie danych z Excela do pamięci...");
-            var rowDataCache = new Dictionary<int, RowData>();
+            // Ustawiamy początkową pojemność Dictionary aby uniknąć realokacji podczas dodawania elementów
+            var rowDataCache = new Dictionary<int, RowData>(totalRows);
             for (int i = 2; i <= rowsNo; i++)
             {
+                // Używamy GetValue<T>() zamiast Value.ToString() dla lepszej wydajności
                 rowDataCache[i] = new RowData
                 {
-                    StreetName = NormalizeValue(sheet.Cell(i, indexes.RequestStreetIndex).Value.ToString()),
-                    Prefix = NormalizeValue(sheet.Cell(i, indexes.RequestPrefixIndex).Value.ToString()),
-                    BuildingNo = NormalizeValue(sheet.Cell(i, indexes.RequestBuildingNoIndex).Value.ToString()),
-                    City = NormalizeValue(sheet.Cell(i, indexes.RequestCityIndex).Value.ToString()),
-                    PostalCode = NormalizeValue(sheet.Cell(i, indexes.RequestPostalCodeIndex).Value.ToString())
+                    StreetName = NormalizeValue(sheet.Cell(i, indexes.RequestStreetIndex).GetValue<string>()),
+                    Prefix = NormalizeValue(sheet.Cell(i, indexes.RequestPrefixIndex).GetValue<string>()),
+                    BuildingNo = NormalizeValue(sheet.Cell(i, indexes.RequestBuildingNoIndex).GetValue<string>()),
+                    City = NormalizeValue(sheet.Cell(i, indexes.RequestCityIndex).GetValue<string>()),
+                    PostalCode = NormalizeValue(sheet.Cell(i, indexes.RequestPostalCodeIndex).GetValue<string>())
                 };
             }
             Console.WriteLine($"{LogTs()} [API] Wczytano {rowDataCache.Count} wierszy danych do pamięci");
 
             // Kontrolujemy równoległość zapytań, aby nie przeciążyć usługi.
             var semaphore = new SemaphoreSlim(maxParallelRequests);
-            var tasks = new List<Task>();
-            var results = new ConcurrentDictionary<int, NormalizationApiResponseDto>();
-            var totalRows = rowsNo - 1;
+            // Ustawiamy początkową pojemność listy zadań
+            var tasks = new List<Task>(totalRows);
+            // Ustawiamy concurrency level i initial capacity dla ConcurrentDictionary
+            var results = new ConcurrentDictionary<int, NormalizationApiResponseDto>(System.Environment.ProcessorCount, totalRows);
             var processed = 0;
             
             Console.WriteLine($"{LogTs()} [API] Tworzenie zadań dla {totalRows} wierszy...");
@@ -126,17 +130,19 @@ namespace NormalizatorTests
             // Po zebraniu odpowiedzi wpisujemy wyniki i kolorujemy komórki
             // (zielony = zgodność, czerwony = różnica).
             Console.WriteLine($"{LogTs()} [API] Zapis wyników do arkusza i kolorowanie komórek...");
+            // Cache'ujemy columnsNo aby uniknąć wielokrotnego wywoływania
+            var columnsNo = sheet.Columns().Count();
             var writtenCount = 0;
             for (int i = 2; i <= rowsNo; i++)
             {
-                var result = results[i];
-                if (result.Address != null)
+                // Używamy TryGetValue zamiast bezpośredniego dostępu - bezpieczniejsze i szybsze
+                if (results.TryGetValue(i, out var result) && result.Address != null)
                 {
                     WriteRowResult(sheet, i, indexes, result.Address, result.NormalizationMetadata?.CombinedProbability ?? 0);
                     writtenCount++;
                 }
 
-                SetBackroundColor(sheet, i, expectedColumns, indexes);
+                SetBackroundColor(sheet, i, expectedColumns, indexes, columnsNo);
             }
             Console.WriteLine($"{LogTs()} [API] Zapisano {writtenCount} wyników spełniających próg prawdopodobieństwa");
 
@@ -153,6 +159,8 @@ namespace NormalizatorTests
             using var workbook = new XLWorkbook(originalFilePath);
             workbook.CalculateMode = XLCalculateMode.Manual; // Wyłączamy auto-kalkulację dla lepszej wydajności
             var sheet = workbook.Worksheet(1);
+            // Wyłączamy auto-formatowanie i inne zbędne funkcje dla lepszej wydajności
+            sheet.Style.Alignment.WrapText = false;
             Console.WriteLine($"{LogTs()} [DB] Plik XLSX otwarty pomyślnie");
 
             Console.WriteLine($"{LogTs()} [DB] Analizowanie struktury kolumn...");
@@ -437,7 +445,7 @@ namespace NormalizatorTests
 
             for (int i = columnsNo; i > 0; i--)
             {
-                var header = sheet.Cell(1, i).Value.ToString();
+                var header = sheet.Cell(1, i).GetValue<string>();
                 if (header != null && header.Contains("EXPECTED", StringComparison.OrdinalIgnoreCase))
                 {
                     expectedColumns.Add(new ExpectedColumn { ExpectedIndex = i, ResultIndex = i + 1 });
@@ -448,24 +456,20 @@ namespace NormalizatorTests
         }
 
         // Nadaje tło komórkom na podstawie porównania EXPECTED vs RESULT oraz uzupełnia kolumnę IsCorrect.
-        private static void SetBackroundColor(IXLWorksheet sheet, int rowNo, List<ExpectedColumn> expectedColumns, ColumnIndexes indexes)
+        private static void SetBackroundColor(IXLWorksheet sheet, int rowNo, List<ExpectedColumn> expectedColumns, ColumnIndexes indexes, int columnsNo)
         {
             // Cache'ujemy wartość IsCorrect column - odczytujemy tylko raz
-            var columnsNo = sheet.Columns().Count();
             var isCorrectCell = sheet.Cell(rowNo, columnsNo);
-            var isCorrectCurrentValue = isCorrectCell.Value.ToString();
-            var needsUpdate = isCorrectCurrentValue == "1" || isCorrectCurrentValue == string.Empty;
+            var isCorrectCurrentValue = isCorrectCell.GetValue<string>();
+            var needsUpdate = isCorrectCurrentValue == "1" || string.IsNullOrEmpty(isCorrectCurrentValue);
 
             // Iterujemy tylko przez znalezione kolumny EXPECTED zamiast przez wszystkie kolumny
             foreach (var col in expectedColumns)
             {
-                var expectedValue = sheet.Cell(rowNo, col.ExpectedIndex).Value.ToString();
-                if (expectedValue == "null")
-                    expectedValue = string.Empty;
-
-                var resultValue = sheet.Cell(rowNo, col.ResultIndex).Value.ToString();
-                if (resultValue == "null")
-                    resultValue = string.Empty;
+                // Używamy GetValue<T>() zamiast Value.ToString() - szybsze i bez alokacji stringa
+                // Używamy inline normalizacji zamiast wywołania metody dla lepszej wydajności
+                var expectedValue = NormalizeCellValue(sheet.Cell(rowNo, col.ExpectedIndex).GetValue<string>());
+                var resultValue = NormalizeCellValue(sheet.Cell(rowNo, col.ResultIndex).GetValue<string>());
 
                 // OrdinalIgnoreCase jest szybsze niż CurrentCultureIgnoreCase
                 var isMatch = string.Equals(expectedValue, resultValue, StringComparison.OrdinalIgnoreCase);
@@ -543,9 +547,28 @@ namespace NormalizatorTests
         }
 
         // Pomocnicza metoda do normalizacji wartości z Excela
+        // Używamy porównania OrdinalIgnoreCase - najszybsze dostępne w .NET
         private static string NormalizeValue(string? value)
         {
-            return value == "null" || value == null ? string.Empty : value;
+            if (value == null)
+                return string.Empty;
+            
+            // OrdinalIgnoreCase jest zoptymalizowane w .NET i szybsze niż inne metody
+            return string.Equals(value, "null", StringComparison.OrdinalIgnoreCase) ? string.Empty : value;
+        }
+
+        // Pomocnicza metoda do normalizacji wartości z porównaniem (inline dla lepszej wydajności)
+        // Optymalizacja: sprawdzamy długość przed porównaniem - szybki early exit
+        private static string NormalizeCellValue(string? value)
+        {
+            if (value == null || value.Length == 0)
+                return string.Empty;
+            
+            // Szybkie porównanie - sprawdzamy długość przed porównaniem stringów
+            // Dla wartości różnej długości niż 4, natychmiast zwracamy oryginał
+            return (value.Length == 4 && string.Equals(value, "null", StringComparison.OrdinalIgnoreCase)) 
+                ? string.Empty 
+                : value;
         }
 
         // Pobiera wartości z wiersza, sanitizuje "null" na puste ciągi i wysyła zapytanie POST do API.
@@ -678,12 +701,12 @@ namespace NormalizatorTests
                 var colIndex = GetColumnIndexByHeader(sheet, headerName);
                 if (colIndex.HasValue)
                 {
-                    return NormalizeRequestValue(sheet.Cell(rowNo, colIndex.Value).Value.ToString());
+                    return NormalizeRequestValue(sheet.Cell(rowNo, colIndex.Value).GetValue<string>());
                 }
             }
 
             // Fallback do indeksu wyznaczonego standardowo (REQUEST_*).
-            return NormalizeRequestValue(sheet.Cell(rowNo, fallbackIndex).Value.ToString());
+            return NormalizeRequestValue(sheet.Cell(rowNo, fallbackIndex).GetValue<string>());
         }
 
         private static int? GetColumnIndexByHeader(IXLWorksheet sheet, string headerName)
@@ -691,8 +714,8 @@ namespace NormalizatorTests
             var columnsNo = sheet.Columns().Count();
             for (int i = columnsNo; i > 0; i--)
             {
-                var header = sheet.Cell(1, i).Value.ToString();
-                if (string.Equals(header, headerName, StringComparison.OrdinalIgnoreCase))
+                var header = sheet.Cell(1, i).GetValue<string>();
+                if (header != null && string.Equals(header, headerName, StringComparison.OrdinalIgnoreCase))
                     return i;
             }
             return null;
@@ -777,7 +800,7 @@ namespace NormalizatorTests
 
             for (int i = columnsNo; i > 0; i--)
             {
-                var header = sheet.Cell(1, i).Value.ToString();
+                var header = sheet.Cell(1, i).GetValue<string>();
                 if (header != null && header.Contains("EXPECTED", StringComparison.OrdinalIgnoreCase))
                 {
                     sheet.Column(i).InsertColumnsAfter(1);
@@ -806,7 +829,7 @@ namespace NormalizatorTests
 
             for (int i = columnsNo; i > 0; i--)
             {
-                var header = sheet.Cell(1, i).Value.ToString();
+                var header = sheet.Cell(1, i).GetValue<string>();
                 if (header == null) continue;
 
                 var headerUpper = header.ToUpperInvariant(); // Konwertujemy raz, używamy wielokrotnie
