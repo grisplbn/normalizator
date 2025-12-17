@@ -60,10 +60,12 @@ namespace NormalizatorTests
         };
 
         // Benchmark API - testuje różne poziomy równoległości aby znaleźć optymalną wartość
-        public static async Task<int> RunBenchmark(string apiUrl, int testRequests = 50)
+        public static async Task<int> RunBenchmark(string apiUrl, int testRequests = 200)
         {
             Console.WriteLine($"{LogTs()} [BENCHMARK] Rozpoczynam benchmark API...");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Testuję {testRequests} requestów dla różnych poziomów równoległości");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Testuję {testRequests} requestów dla niższych poziomów równoległości (5-30)");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Dla wyższych poziomów (50-100) użyję {testRequests * 2} requestów dla lepszej precyzji statystycznej");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] To może zająć kilka minut, proszę czekać...");
             
             // Testowe dane do wysłania
             var testData = new RowData
@@ -80,21 +82,51 @@ namespace NormalizatorTests
 
             foreach (var level in levels)
             {
-                Console.WriteLine($"{LogTs()} [BENCHMARK] Testuję równoległość = {level}...");
-                var result = await BenchmarkLevel(apiUrl, testData, level, testRequests);
+                // Dla wyższych poziomów równoległości zwiększamy liczbę próbek dla lepszej precyzji statystycznej
+                var actualTestRequests = level >= 50 ? testRequests * 2 : testRequests;
+                Console.WriteLine($"{LogTs()} [BENCHMARK] Testuję równoległość = {level} ({actualTestRequests} próbek)...");
+                var result = await BenchmarkLevel(apiUrl, testData, level, actualTestRequests);
                 results[level] = result;
-                Console.WriteLine($"{LogTs()} [BENCHMARK]   Wynik: {result.RequestsPerSecond:F2} req/s, średni czas: {result.AverageLatencyMs:F0}ms");
+                
+                var statusIndicator = result.ErrorRate > 10 ? "⚠️" : result.ErrorRate > 0 ? "⚡" : "✓";
+                var totalTested = result.SuccessCount + result.ErrorCount;
+                Console.WriteLine($"{LogTs()} [BENCHMARK]   {statusIndicator} Wynik: {result.RequestsPerSecond:F2} req/s, średni czas: {result.AverageLatencyMs:F0}ms, sukces: {result.SuccessCount}/{totalTested} ({100.0 - result.ErrorRate:F1}%)");
+                
+                if (result.ErrorCount > 0)
+                {
+                    var errorDetails = new List<string>();
+                    if (result.TimeoutCount > 0) errorDetails.Add($"{result.TimeoutCount} timeoutów");
+                    if (result.HttpErrorCount > 0) errorDetails.Add($"{result.HttpErrorCount} błędów HTTP");
+                    if (result.OtherErrorCount > 0) errorDetails.Add($"{result.OtherErrorCount} innych błędów");
+                    
+                    Console.WriteLine($"{LogTs()} [BENCHMARK]     Błędy: {string.Join(", ", errorDetails)}");
+                }
             }
 
             // Znajdź optymalny poziom (najwyższa przepustowość z rozsądnym opóźnieniem)
             var optimal = FindOptimalParallelism(results);
             
+            var recommendedResult = results[optimal.Recommended];
+            
             Console.WriteLine($"{LogTs()} [BENCHMARK] ========== WYNIKI BENCHMARKA ==========");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Najlepsza przepustowość: {optimal.BestThroughput.RequestsPerSecond:F2} req/s przy {optimal.BestThroughput.Parallelism} równoległych requestach");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Najlepsze opóźnienie: {optimal.BestLatency.AverageLatencyMs:F0}ms przy {optimal.BestLatency.Parallelism} równoległych requestach");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Najlepsza przepustowość: {optimal.BestThroughput.RequestsPerSecond:F2} req/s przy {optimal.BestThroughput.Parallelism} równoległych requestach (błędów: {optimal.BestThroughput.ErrorRate:F1}%)");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Najlepsze opóźnienie: {optimal.BestLatency.AverageLatencyMs:F0}ms przy {optimal.BestLatency.Parallelism} równoległych requestach (błędów: {optimal.BestLatency.ErrorRate:F1}%)");
             Console.WriteLine($"{LogTs()} [BENCHMARK] REKOMENDOWANA wartość MaxParallelRequests: {optimal.Recommended}");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwana przepustowość: {results[optimal.Recommended].RequestsPerSecond:F2} req/s");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwane średnie opóźnienie: {results[optimal.Recommended].AverageLatencyMs:F0}ms");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwana przepustowość: {recommendedResult.RequestsPerSecond:F2} req/s");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwane średnie opóźnienie: {recommendedResult.AverageLatencyMs:F0}ms");
+            var totalTestedForRecommended = recommendedResult.SuccessCount + recommendedResult.ErrorCount;
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwana liczba błędów: {recommendedResult.ErrorRate:F1}% ({recommendedResult.ErrorCount} błędów na {totalTestedForRecommended} requestów)");
+            
+            if (recommendedResult.ErrorCount > 0)
+            {
+                Console.WriteLine($"{LogTs()} [BENCHMARK]   Szczegóły błędów: {recommendedResult.TimeoutCount} timeoutów, {recommendedResult.HttpErrorCount} błędów HTTP, {recommendedResult.OtherErrorCount} innych");
+            }
+            
+            if (recommendedResult.ErrorRate > 5.0)
+            {
+                Console.WriteLine($"{LogTs()} [BENCHMARK] ⚠️  OSTRZEŻENIE: Rekomendowany poziom ma >5% błędów. Rozważ użycie niższej wartości MaxParallelRequests.");
+            }
+            
             Console.WriteLine($"{LogTs()} [BENCHMARK] ========================================");
 
             return optimal.Recommended;
@@ -103,7 +135,7 @@ namespace NormalizatorTests
         private static async Task<BenchmarkResult> BenchmarkLevel(string apiUrl, RowData testData, int parallelism, int totalRequests)
         {
             var semaphore = new SemaphoreSlim(parallelism);
-            var tasks = new List<Task<long>>();
+            var tasks = new List<Task<BenchmarkRequestResult>>();
             var startTime = DateTime.UtcNow;
 
             for (int i = 0; i < totalRequests; i++)
@@ -111,29 +143,98 @@ namespace NormalizatorTests
                 tasks.Add(BenchmarkSingleRequest(apiUrl, testData, semaphore));
             }
 
-            var latencies = await Task.WhenAll(tasks);
+            var results = await Task.WhenAll(tasks);
             var endTime = DateTime.UtcNow;
             var duration = (endTime - startTime).TotalSeconds;
-            var requestsPerSecond = totalRequests / duration;
-            var averageLatency = latencies.Average();
+
+            // Filtrujemy tylko poprawne odpowiedzi do obliczeń przepustowości
+            var successfulResults = results.Where(r => r.IsSuccess).ToList();
+            var successCount = successfulResults.Count;
+            var errorCount = results.Length - successCount;
+            var errorRate = (double)errorCount / results.Length * 100.0;
+
+            // Obliczamy przepustowość tylko dla poprawnych requestów
+            var requestsPerSecond = successCount / duration;
+            var averageLatency = successfulResults.Any() ? successfulResults.Select(r => r.LatencyMs).Average() : 0;
+
+            // Śledzenie typów błędów
+            var timeoutCount = results.Count(r => r.IsTimeout);
+            var httpErrorCount = results.Count(r => r.IsHttpError);
+            var otherErrorCount = results.Count(r => !r.IsSuccess && !r.IsTimeout && !r.IsHttpError);
 
             return new BenchmarkResult
             {
                 Parallelism = parallelism,
                 RequestsPerSecond = requestsPerSecond,
-                AverageLatencyMs = averageLatency
+                AverageLatencyMs = averageLatency,
+                SuccessCount = successCount,
+                ErrorCount = errorCount,
+                ErrorRate = errorRate,
+                TimeoutCount = timeoutCount,
+                HttpErrorCount = httpErrorCount,
+                OtherErrorCount = otherErrorCount
             };
         }
 
-        private static async Task<long> BenchmarkSingleRequest(string apiUrl, RowData testData, SemaphoreSlim semaphore)
+        private static async Task<BenchmarkRequestResult> BenchmarkSingleRequest(string apiUrl, RowData testData, SemaphoreSlim semaphore)
         {
             await semaphore.WaitAsync();
             try
             {
                 var startTime = DateTime.UtcNow;
-                await GetResultForRow(testData, apiUrl);
-                var elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds;
-                return (long)elapsed;
+                
+                try
+                {
+                    var result = await GetResultForRow(testData, apiUrl);
+                    var elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds;
+                    
+                    // Sprawdzamy czy odpowiedź jest poprawna (nie jest pusta i ma dane)
+                    var isSuccess = result != null && result.Address != null;
+                    
+                    return new BenchmarkRequestResult
+                    {
+                        IsSuccess = isSuccess,
+                        IsTimeout = false,
+                        IsHttpError = !isSuccess,
+                        LatencyMs = (long)elapsed
+                    };
+                }
+                catch (TaskCanceledException) when (DateTime.UtcNow - startTime > TimeSpan.FromMinutes(4))
+                {
+                    // Timeout (HttpClient ma timeout 5 minut, więc jeśli upłynęło >4 min, to prawdopodobnie timeout)
+                    var elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds;
+                    return new BenchmarkRequestResult
+                    {
+                        IsSuccess = false,
+                        IsTimeout = true,
+                        IsHttpError = false,
+                        LatencyMs = (long)elapsed
+                    };
+                }
+                catch (System.Net.Http.HttpRequestException)
+                {
+                    // Błąd HTTP (połączenie, timeout sieciowy, itp.)
+                    var elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds;
+                    return new BenchmarkRequestResult
+                    {
+                        IsSuccess = false,
+                        IsTimeout = false,
+                        IsHttpError = true,
+                        LatencyMs = (long)elapsed
+                    };
+                }
+                catch
+                {
+                    // Inny błąd
+                    var elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds;
+                    return new BenchmarkRequestResult
+                    {
+                        IsSuccess = false,
+                        IsTimeout = false,
+                        IsHttpError = false,
+                        LatencyMs = (long)elapsed
+                    };
+                }
             }
             finally
             {
@@ -141,18 +242,40 @@ namespace NormalizatorTests
             }
         }
 
+        private class BenchmarkRequestResult
+        {
+            public bool IsSuccess { get; set; }
+            public bool IsTimeout { get; set; }
+            public bool IsHttpError { get; set; }
+            public long LatencyMs { get; set; }
+        }
+
         private static (BenchmarkResult BestThroughput, BenchmarkResult BestLatency, int Recommended) FindOptimalParallelism(Dictionary<int, BenchmarkResult> results)
         {
-            var bestThroughput = results.Values.OrderByDescending(r => r.RequestsPerSecond).First();
-            var bestLatency = results.Values.OrderBy(r => r.AverageLatencyMs).First();
+            // Filtrujemy wyniki z za dużą liczbą błędów (>5% błędów) - nie są bezpieczne
+            var reliableResults = results.Values.Where(r => r.ErrorRate <= 5.0).ToList();
+            
+            if (!reliableResults.Any())
+            {
+                // Jeśli wszystkie mają błędy, używamy tego z najmniejszą liczbą błędów
+                reliableResults = results.Values.OrderBy(r => r.ErrorRate).Take(3).ToList();
+                Console.WriteLine($"{LogTs()} [BENCHMARK] ⚠️  OSTRZEŻENIE: Wszystkie poziomy równoległości mają błędy! Używam poziomów z najmniejszą liczbą błędów.");
+            }
 
-            // Rekomendacja: wybierz poziom który ma >90% najlepszej przepustowości i <150% najlepszego opóźnienia
+            var bestThroughput = reliableResults.OrderByDescending(r => r.RequestsPerSecond).First();
+            var bestLatency = reliableResults.Where(r => r.SuccessCount > 0).OrderBy(r => r.AverageLatencyMs).FirstOrDefault() ?? bestThroughput;
+
+            // Rekomendacja: wybierz poziom który ma >90% najlepszej przepustowości, <150% najlepszego opóźnienia
+            // i <=5% błędów (bezpieczny poziom)
             var thresholdThroughput = bestThroughput.RequestsPerSecond * 0.90;
             var thresholdLatency = bestLatency.AverageLatencyMs * 1.50;
 
-            var candidates = results.Values
-                .Where(r => r.RequestsPerSecond >= thresholdThroughput && r.AverageLatencyMs <= thresholdLatency)
+            var candidates = reliableResults
+                .Where(r => r.RequestsPerSecond >= thresholdThroughput 
+                         && r.AverageLatencyMs <= thresholdLatency
+                         && r.ErrorRate <= 5.0)
                 .OrderByDescending(r => r.RequestsPerSecond)
+                .ThenBy(r => r.ErrorRate)
                 .ThenBy(r => r.Parallelism);
 
             var recommended = candidates.FirstOrDefault() ?? bestThroughput;
@@ -165,6 +288,12 @@ namespace NormalizatorTests
             public int Parallelism { get; set; }
             public double RequestsPerSecond { get; set; }
             public double AverageLatencyMs { get; set; }
+            public int SuccessCount { get; set; }
+            public int ErrorCount { get; set; }
+            public double ErrorRate { get; set; }
+            public int TimeoutCount { get; set; }
+            public int HttpErrorCount { get; set; }
+            public int OtherErrorCount { get; set; }
         }
 
         // Główny przebieg testów dla API: odczyt danych z Excela, wywołanie API,
