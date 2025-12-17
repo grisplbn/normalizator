@@ -108,12 +108,116 @@ namespace NormalizatorTests
             
             var recommendedResult = results[optimal.Recommended];
             
-            Console.WriteLine($"{LogTs()} [BENCHMARK] ========== WYNIKI BENCHMARKA ==========");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Najlepsza przepustowość: {optimal.BestThroughput.RequestsPerSecond:F2} req/s przy {optimal.BestThroughput.Parallelism} równoległych requestach (błędów: {optimal.BestThroughput.ErrorRate:F1}%)");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Najlepsze opóźnienie: {optimal.BestLatency.AverageLatencyMs:F0}ms przy {optimal.BestLatency.Parallelism} równoległych requestach (błędów: {optimal.BestLatency.ErrorRate:F1}%)");
+            // Wyświetl szczegółową tabelę porównawczą wszystkich poziomów
+            Console.WriteLine($"{LogTs()} [BENCHMARK] ========== SZCZEGÓŁOWA TABELA PORÓWNAWCZA ==========");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] {"Równoległość",-15} {"Req/s",-12} {"Średni",-10} {"Min",-10} {"Max",-10} {"Błędy",-10} {"Efektywność",-12} {"Status"}");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] {"",-15} {"",-12} {"czas (ms)",-10} {"(ms)",-10} {"(ms)",-10} {"%",-10} {"(req/s/ms)",-12} {""}");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] {new string('-', 90)}");
+            
+            foreach (var level in levels.OrderBy(l => l))
+            {
+                if (results.TryGetValue(level, out var result))
+                {
+                    // Obliczamy efektywność: req/s per ms (im wyższe, tym lepiej)
+                    var efficiency = result.AverageLatencyMs > 0 ? result.RequestsPerSecond / result.AverageLatencyMs * 1000 : 0;
+                    
+                    var statusIcon = result.ErrorRate > 10 ? "⚠️" : result.ErrorRate > 5 ? "⚡" : result.ErrorRate > 0 ? "✓" : "✓";
+                    var statusText = result.ErrorRate > 10 ? "RYZYKO" : result.ErrorRate > 5 ? "OK" : result.ErrorRate > 0 ? "OK" : "IDEAL";
+                    
+                    Console.WriteLine($"{LogTs()} [BENCHMARK] {result.Parallelism,-15} {result.RequestsPerSecond,-12:F2} {result.AverageLatencyMs,-10:F0} {result.MinLatencyMs,-10:F0} {result.MaxLatencyMs,-10:F0} {result.ErrorRate,-10:F1}% {efficiency,-12:F2} {statusIcon} {statusText}");
+                }
+            }
+            
+            Console.WriteLine($"{LogTs()} [BENCHMARK] {new string('-', 90)}");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Efektywność = (Req/s / Średni czas) × 1000 - im wyższa, tym lepiej");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] ");
+            
+            // Analiza trendów - porównanie wzrostu przepustowości vs wzrostu opóźnień
+            Console.WriteLine($"{LogTs()} [BENCHMARK] ========== ANALIZA TRENDÓW (Przepustowość vs Opóźnienia) ==========");
+            var sortedResults = results.Values.Where(r => r.SuccessCount > 0).OrderBy(r => r.Parallelism).ToList();
+            
+            if (sortedResults.Count > 1)
+            {
+                Console.WriteLine($"{LogTs()} [BENCHMARK] {"Z",-5} {"Na",-5} {"Δ Req/s",-12} {"Δ Opóźnienie",-15} {"Korzyść",-12} {"Komentarz"}");
+                Console.WriteLine($"{LogTs()} [BENCHMARK] {new string('-', 80)}");
+                
+                for (int i = 1; i < sortedResults.Count; i++)
+                {
+                    var prev = sortedResults[i - 1];
+                    var curr = sortedResults[i];
+                    
+                    var throughputDelta = curr.RequestsPerSecond - prev.RequestsPerSecond;
+                    var latencyDelta = curr.AverageLatencyMs - prev.AverageLatencyMs;
+                    var latencyDeltaPercent = prev.AverageLatencyMs > 0 ? (latencyDelta / prev.AverageLatencyMs) * 100 : 0;
+                    var throughputDeltaPercent = prev.RequestsPerSecond > 0 ? (throughputDelta / prev.RequestsPerSecond) * 100 : 0;
+                    
+                    // Korzyść = procentowy wzrost przepustowości vs procentowy wzrost opóźnień
+                    var benefit = latencyDeltaPercent > 0 ? throughputDeltaPercent / latencyDeltaPercent : double.MaxValue;
+                    
+                    string comment;
+                    if (throughputDelta < 0)
+                        comment = "⚠️ Przepustowość SPADA";
+                    else if (latencyDeltaPercent > 50 && throughputDeltaPercent < 10)
+                        comment = "⚠️ Opóźnienia ROSNĄ dużo szybciej niż przepustowość";
+                    else if (latencyDeltaPercent > throughputDeltaPercent * 2)
+                        comment = "⚠️ Opóźnienia rosną 2x szybciej";
+                    else if (benefit > 2)
+                        comment = "✓ Dobry kompromis";
+                    else if (benefit > 1)
+                        comment = "⚡ Akceptowalny";
+                    else
+                        comment = "⚠️ Słaby kompromis";
+                    
+                    Console.WriteLine($"{LogTs()} [BENCHMARK] {prev.Parallelism,-5} {curr.Parallelism,-5} {throughputDelta:+0.00;-0.00;0.00} ({throughputDeltaPercent:+0.0;-0.0;0.0}%) {latencyDelta:+0.0;-0.0;0.0}ms ({latencyDeltaPercent:+0.0;-0.0;0.0}%) {benefit:F2}x {comment}");
+                }
+                
+                Console.WriteLine($"{LogTs()} [BENCHMARK] {new string('-', 80)}");
+                Console.WriteLine($"{LogTs()} [BENCHMARK] Korzyść = (Wzrost przepustowości %) / (Wzrost opóźnień %) - im wyższa, tym lepiej");
+                Console.WriteLine($"{LogTs()} [BENCHMARK] ");
+                
+                // Znajdź punkt gdzie korzyść jest najlepsza i gdzie zaczyna spadać
+                var benefitData = sortedResults.Skip(1).Select((curr, idx) =>
+                {
+                    var prev = sortedResults[idx];
+                    var throughputDeltaPercent = prev.RequestsPerSecond > 0 ? ((curr.RequestsPerSecond - prev.RequestsPerSecond) / prev.RequestsPerSecond) * 100 : 0;
+                    var latencyDeltaPercent = prev.AverageLatencyMs > 0 ? ((curr.AverageLatencyMs - prev.AverageLatencyMs) / prev.AverageLatencyMs) * 100 : 0;
+                    var benefit = latencyDeltaPercent > 0 ? throughputDeltaPercent / latencyDeltaPercent : double.MaxValue;
+                    return (FromLevel: prev.Parallelism, ToLevel: curr.Parallelism, Benefit: benefit);
+                }).Where(b => b.Benefit < double.MaxValue).ToList();
+                
+                var bestBenefit = benefitData.OrderByDescending(b => b.Benefit).FirstOrDefault();
+                var worstBenefitAfter = benefitData.Where(b => b.Benefit < 1.0 && b.FromLevel > (bestBenefit.FromLevel > 0 ? bestBenefit.FromLevel : 10)).FirstOrDefault();
+                
+                if (bestBenefit.FromLevel > 0)
+                {
+                    Console.WriteLine($"{LogTs()} [BENCHMARK] 💡 Najlepszy kompromis: {bestBenefit.FromLevel} → {bestBenefit.ToLevel} równoległych requestów (korzyść: {bestBenefit.Benefit:F2}x)");
+                }
+                
+                if (worstBenefitAfter.FromLevel > 0)
+                {
+                    Console.WriteLine($"{LogTs()} [BENCHMARK] ⚠️  Od {worstBenefitAfter.FromLevel} → {worstBenefitAfter.ToLevel} korzyść spada poniżej 1.0x - opóźnienia rosną szybciej niż przepustowość");
+                    Console.WriteLine($"{LogTs()} [BENCHMARK]    Rozważ zatrzymanie się na poziomie {worstBenefitAfter.FromLevel} lub niższym");
+                }
+            }
+            
+            Console.WriteLine($"{LogTs()} [BENCHMARK] ");
+            
+            // Rekomendacje
+            Console.WriteLine($"{LogTs()} [BENCHMARK] ========== REKOMENDACJE ==========");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Najlepsza przepustowość: {optimal.BestThroughput.RequestsPerSecond:F2} req/s przy {optimal.BestThroughput.Parallelism} równoległych requestach");
+            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Średni czas: {optimal.BestThroughput.AverageLatencyMs:F0}ms");
+            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Błędy: {optimal.BestThroughput.ErrorRate:F1}%");
+            
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Najlepsze opóźnienie: {optimal.BestLatency.AverageLatencyMs:F0}ms przy {optimal.BestLatency.Parallelism} równoległych requestach");
+            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Przepustowość: {optimal.BestLatency.RequestsPerSecond:F2} req/s");
+            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Błędy: {optimal.BestLatency.ErrorRate:F1}%");
+            
+            Console.WriteLine($"{LogTs()} [BENCHMARK] ");
             Console.WriteLine($"{LogTs()} [BENCHMARK] REKOMENDOWANA wartość MaxParallelRequests: {optimal.Recommended}");
             Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwana przepustowość: {recommendedResult.RequestsPerSecond:F2} req/s");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwane średnie opóźnienie: {recommendedResult.AverageLatencyMs:F0}ms");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwane średnie opóźnienie: {recommendedResult.AverageLatencyMs:F0}ms (min: {recommendedResult.MinLatencyMs:F0}ms, max: {recommendedResult.MaxLatencyMs:F0}ms)");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Efektywność: {recommendedResult.RequestsPerSecond / recommendedResult.AverageLatencyMs * 1000:F2}");
+            
             var totalTestedForRecommended = recommendedResult.SuccessCount + recommendedResult.ErrorCount;
             Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwana liczba błędów: {recommendedResult.ErrorRate:F1}% ({recommendedResult.ErrorCount} błędów na {totalTestedForRecommended} requestów)");
             
@@ -156,6 +260,8 @@ namespace NormalizatorTests
             // Obliczamy przepustowość tylko dla poprawnych requestów
             var requestsPerSecond = successCount / duration;
             var averageLatency = successfulResults.Any() ? successfulResults.Select(r => r.LatencyMs).Average() : 0;
+            var minLatency = successfulResults.Any() ? successfulResults.Min(r => r.LatencyMs) : 0;
+            var maxLatency = successfulResults.Any() ? successfulResults.Max(r => r.LatencyMs) : 0;
 
             // Śledzenie typów błędów
             var timeoutCount = results.Count(r => r.IsTimeout);
@@ -167,6 +273,8 @@ namespace NormalizatorTests
                 Parallelism = parallelism,
                 RequestsPerSecond = requestsPerSecond,
                 AverageLatencyMs = averageLatency,
+                MinLatencyMs = minLatency,
+                MaxLatencyMs = maxLatency,
                 SuccessCount = successCount,
                 ErrorCount = errorCount,
                 ErrorRate = errorRate,
@@ -288,6 +396,8 @@ namespace NormalizatorTests
             public int Parallelism { get; set; }
             public double RequestsPerSecond { get; set; }
             public double AverageLatencyMs { get; set; }
+            public double MinLatencyMs { get; set; }
+            public double MaxLatencyMs { get; set; }
             public int SuccessCount { get; set; }
             public int ErrorCount { get; set; }
             public double ErrorRate { get; set; }
