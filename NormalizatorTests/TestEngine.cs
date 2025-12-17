@@ -595,8 +595,12 @@ namespace NormalizatorTests
 
                 // Używamy współdzielonego HttpClient z optymalizowanymi ustawieniami JSON
                 var requestContent = JsonContent.Create(body, options: JsonOptions);
-                // Używamy ResponseHeadersRead aby rozpocząć deserializację jak najszybciej
-                var response = await SharedHttpClient.PostAsync(endpoint, requestContent, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, CancellationToken.None);
+                // Używamy SendAsync z HttpRequestMessage aby móc użyć HttpCompletionOption.ResponseHeadersRead
+                using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+                {
+                    Content = requestContent
+                };
+                var response = await SharedHttpClient.SendAsync(request, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, CancellationToken.None);
                 
                 if (!response.IsSuccessStatusCode)
                 {
