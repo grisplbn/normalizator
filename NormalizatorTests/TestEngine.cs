@@ -63,8 +63,10 @@ namespace NormalizatorTests
         public static async Task<int> RunBenchmark(string apiUrl, int testRequests = 200)
         {
             Console.WriteLine($"{LogTs()} [BENCHMARK] Rozpoczynam benchmark API...");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Testuję {testRequests} requestów dla niższych poziomów równoległości (5-30)");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] Dla wyższych poziomów (50-100) użyję {testRequests * 2} requestów dla lepszej precyzji statystycznej");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] Testuję różne poziomy równoległości:");
+            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Poziomy 1-10: {testRequests / 4} próbek (szybki test)");
+            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Poziomy 15-30: {testRequests} próbek");
+            Console.WriteLine($"{LogTs()} [BENCHMARK]   - Poziomy 50-100: {testRequests * 2} próbek (większa precyzja statystyczna)");
             Console.WriteLine($"{LogTs()} [BENCHMARK] To może zająć kilka minut, proszę czekać...");
             
             // Testowe dane do wysłania
@@ -77,20 +79,38 @@ namespace NormalizatorTests
                 PostalCode = "00-001"
             };
 
-            var levels = new[] { 5, 10, 15, 20, 30, 50, 75, 100 };
+            // Testujemy od 1 do 10, a potem wyższe poziomy
+            var levels = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 50, 75, 100 };
             var results = new Dictionary<int, BenchmarkResult>();
 
             foreach (var level in levels)
             {
-                // Dla wyższych poziomów równoległości zwiększamy liczbę próbek dla lepszej precyzji statystycznej
-                var actualTestRequests = level >= 50 ? testRequests * 2 : testRequests;
+                // Określamy liczbę próbek w zależności od poziomu równoległości
+                int actualTestRequests;
+                if (level <= 10)
+                {
+                    // Dla niskich poziomów (1-10) używamy mniejszej liczby próbek dla szybkości
+                    actualTestRequests = testRequests / 4; // np. 50 próbek jeśli testRequests = 200
+                }
+                else if (level >= 50)
+                {
+                    // Dla wyższych poziomów (50+) zwiększamy liczbę próbek dla lepszej precyzji statystycznej
+                    actualTestRequests = testRequests * 2;
+                }
+                else
+                {
+                    // Dla średnich poziomów (15-30) używamy standardowej liczby próbek
+                    actualTestRequests = testRequests;
+                }
+                
                 Console.WriteLine($"{LogTs()} [BENCHMARK] Testuję równoległość = {level} ({actualTestRequests} próbek)...");
                 var result = await BenchmarkLevel(apiUrl, testData, level, actualTestRequests);
                 results[level] = result;
                 
                 var statusIndicator = result.ErrorRate > 10 ? "⚠️" : result.ErrorRate > 0 ? "⚡" : "✓";
                 var totalTested = result.SuccessCount + result.ErrorCount;
-                Console.WriteLine($"{LogTs()} [BENCHMARK]   {statusIndicator} Wynik: {result.RequestsPerSecond:F2} req/s, średni czas: {result.AverageLatencyMs:F0}ms, sukces: {result.SuccessCount}/{totalTested} ({100.0 - result.ErrorRate:F1}%)");
+                var timeFor100K = FormatTimeFor100KStatic(result.RequestsPerSecond);
+                Console.WriteLine($"{LogTs()} [BENCHMARK]   {statusIndicator} Wynik: {result.RequestsPerSecond:F2} req/s, średni czas: {result.AverageLatencyMs:F0}ms, sukces: {result.SuccessCount}/{totalTested} ({100.0 - result.ErrorRate:F1}%), 100k req: ~{timeFor100K}");
                 
                 if (result.ErrorCount > 0)
                 {
@@ -125,12 +145,12 @@ namespace NormalizatorTests
             optimal = FindOptimalParallelism(results);
             
             var recommendedResult = results[optimal.Recommended];
-            
+
             // Wyświetl szczegółową tabelę porównawczą wszystkich poziomów (z obu iteracji)
             Console.WriteLine($"{LogTs()} [BENCHMARK] ========== SZCZEGÓŁOWA TABELA PORÓWNAWCZA (I + II iteracja) ==========");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] {"Równoległość",-15} {"Req/s",-12} {"Średni",-10} {"Min",-10} {"Max",-10} {"Błędy",-10} {"Efektywność",-12} {"Status"}");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] {"",-15} {"",-12} {"czas (ms)",-10} {"(ms)",-10} {"(ms)",-10} {"%",-10} {"(req/s/ms)",-12} {""}");
-            Console.WriteLine($"{LogTs()} [BENCHMARK] {new string('-', 90)}");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] {"Równoległość",-15} {"Req/s",-12} {"Średni",-10} {"Min",-10} {"Max",-10} {"Błędy",-10} {"Efektywność",-12} {"100k req",-15} {"Status"}");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] {"",-15} {"",-12} {"czas (ms)",-10} {"(ms)",-10} {"(ms)",-10} {"%",-10} {"(req/s/ms)",-12} {"(czas)",-15} {""}");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] {new string('-', 120)}");
             
             // Wyświetlamy wszystkie wyniki posortowane po równoległości
             var allResults = results.Values.OrderBy(r => r.Parallelism).ToList();
@@ -148,11 +168,14 @@ namespace NormalizatorTests
                     ? result.Parallelism.ToString() 
                     : $"{result.Parallelism}";
                 
-                Console.WriteLine($"{LogTs()} [BENCHMARK] {iterationMark} {parallelismDisplay,-12} {result.RequestsPerSecond,-12:F2} {result.AverageLatencyMs,-10:F0} {result.MinLatencyMs,-10:F0} {result.MaxLatencyMs,-10:F0} {result.ErrorRate,-10:F1}% {efficiency,-12:F2} {statusIcon} {statusText}");
+                var timeFor100K = FormatTimeFor100KStatic(result.RequestsPerSecond);
+                
+                Console.WriteLine($"{LogTs()} [BENCHMARK] {iterationMark} {parallelismDisplay,-12} {result.RequestsPerSecond,-12:F2} {result.AverageLatencyMs,-10:F0} {result.MinLatencyMs,-10:F0} {result.MaxLatencyMs,-10:F0} {result.ErrorRate,-10:F1}% {efficiency,-12:F2} {timeFor100K,-15} {statusIcon} {statusText}");
             }
             
-            Console.WriteLine($"{LogTs()} [BENCHMARK] {new string('-', 90)}");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] {new string('-', 120)}");
             Console.WriteLine($"{LogTs()} [BENCHMARK] Efektywność = (Req/s / Średni czas) × 1000 - im wyższa, tym lepiej");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] 100k req = szacowany czas wykonania 100 000 requestów przy danej przepustowości");
             Console.WriteLine($"{LogTs()} [BENCHMARK] ");
             
             // Funkcja pomocnicza do obliczania efektywności
@@ -273,6 +296,7 @@ namespace NormalizatorTests
             Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwana przepustowość: {recommendedResult.RequestsPerSecond:F2} req/s");
             Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwane średnie opóźnienie: {recommendedResult.AverageLatencyMs:F0}ms (min: {recommendedResult.MinLatencyMs:F0}ms, max: {recommendedResult.MaxLatencyMs:F0}ms)");
             Console.WriteLine($"{LogTs()} [BENCHMARK] ⭐ EFEKTYWNOŚĆ: {CalculateEfficiency(recommendedResult):F2}");
+            Console.WriteLine($"{LogTs()} [BENCHMARK] ⏱️  Szacowany czas dla 100 000 requestów: ~{FormatTimeFor100KStatic(recommendedResult.RequestsPerSecond)}");
             
             var totalTestedForRecommended = recommendedResult.SuccessCount + recommendedResult.ErrorCount;
             Console.WriteLine($"{LogTs()} [BENCHMARK] Oczekiwana liczba błędów: {recommendedResult.ErrorRate:F1}% ({recommendedResult.ErrorCount} błędów na {totalTestedForRecommended} requestów)");
@@ -290,6 +314,23 @@ namespace NormalizatorTests
             Console.WriteLine($"{LogTs()} [BENCHMARK] ========================================");
 
             return optimal.Recommended;
+        }
+
+        // Funkcja pomocnicza do formatowania czasu dla 100k requestów (dostępna dla wszystkich metod)
+        private static string FormatTimeFor100KStatic(double requestsPerSecond)
+        {
+            if (requestsPerSecond <= 0) return "N/A";
+            var totalSeconds = 100000.0 / requestsPerSecond;
+            var hours = (int)(totalSeconds / 3600);
+            var minutes = (int)((totalSeconds % 3600) / 60);
+            var seconds = (int)(totalSeconds % 60);
+            
+            if (hours > 0)
+                return $"{hours}h {minutes}m {seconds}s";
+            else if (minutes > 0)
+                return $"{minutes}m {seconds}s";
+            else
+                return $"{seconds}s";
         }
 
         // Druga iteracja benchmarka - szczegółowe przeszukanie wokół najbardziej obiecujących wartości
@@ -429,14 +470,34 @@ namespace NormalizatorTests
             
             foreach (var level in newValues)
             {
-                var actualTestRequests = level >= 50 ? baseTestRequests * 2 : baseTestRequests;
+                // Określamy liczbę próbek w zależności od poziomu równoległości (tak samo jak w I iteracji)
+                int actualTestRequests;
+                if (level <= 10)
+                {
+                    // Dla niskich poziomów (1-10) używamy mniejszej liczby próbek dla szybkości
+                    actualTestRequests = baseTestRequests / 4;
+                }
+                else if (level >= 50)
+                {
+                    // Dla wyższych poziomów (50+) zwiększamy liczbę próbek dla lepszej precyzji statystycznej
+                    actualTestRequests = baseTestRequests * 2;
+                }
+                else
+                {
+                    // Dla średnich poziomów (15-30) używamy standardowej liczby próbek
+                    actualTestRequests = baseTestRequests;
+                }
+                
                 Console.WriteLine($"{LogTs()} [BENCHMARK] [II] Testuję równoległość = {level} ({actualTestRequests} próbek)...");
                 var result = await BenchmarkLevel(apiUrl, testData, level, actualTestRequests);
                 detailedResults[level] = result;
                 
                 var statusIndicator = result.ErrorRate > 10 ? "⚠️" : result.ErrorRate > 0 ? "⚡" : "✓";
                 var totalTested = result.SuccessCount + result.ErrorCount;
-                Console.WriteLine($"{LogTs()} [BENCHMARK] [II]   {statusIndicator} Wynik: {result.RequestsPerSecond:F2} req/s, średni czas: {result.AverageLatencyMs:F0}ms, sukces: {result.SuccessCount}/{totalTested} ({100.0 - result.ErrorRate:F1}%)");
+                
+                // Oblicz czas dla 100k requestów - użyj funkcji z zakresu zewnętrznego
+                var timeFor100K = FormatTimeFor100KStatic(result.RequestsPerSecond);
+                Console.WriteLine($"{LogTs()} [BENCHMARK] [II]   {statusIndicator} Wynik: {result.RequestsPerSecond:F2} req/s, średni czas: {result.AverageLatencyMs:F0}ms, sukces: {result.SuccessCount}/{totalTested} ({100.0 - result.ErrorRate:F1}%), 100k req: ~{timeFor100K}");
                 
                 if (result.ErrorCount > 0)
                 {
