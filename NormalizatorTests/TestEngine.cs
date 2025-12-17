@@ -10,9 +10,31 @@ namespace NormalizatorTests
 {
     internal class TestEngine
     {
+        // Współdzielony HttpClient dla wszystkich zapytań API (thread-safe)
+        private static readonly Lazy<HttpClient> _sharedHttpClient = new Lazy<HttpClient>(() =>
+        {
+            var handler = new HttpClientHandler
+            {
+                MaxConnectionsPerServer = 100, // Zwiększamy limit połączeń równoległych na serwer
+                UseCookies = false // Wyłączamy cookies jeśli nie są potrzebne dla lepszej wydajności
+            };
+
+            var client = new HttpClient(handler)
+            {
+                Timeout = TimeSpan.FromMinutes(5) // Timeout 5 minut dla długich zapytań
+            };
+
+            // HttpClient automatycznie zarządza nagłówkiem Connection i keep-alive
+            // Nie trzeba go ustawiać ręcznie - MaxConnectionsPerServer w handlerze wystarczy
+            
+            return client;
+        });
+
+        private static HttpClient SharedHttpClient => _sharedHttpClient.Value;
+
         // Główny przebieg testów dla API: odczyt danych z Excela, wywołanie API,
         // zapis wyników i wizualne oznaczenie poprawności.
-        public static async Task RunApiTest(string originalFilePath, string resultFilePath, string apiUrl, decimal probabilityThreshold, int maxParallelRequests)
+        public static async Task RunApiTest(string originalFilePath, string resultFilePath, string apiUrl, int maxParallelRequests)
         {
             Console.WriteLine($"{LogTs()} [API] Otwieranie pliku XLSX: {originalFilePath}");
             using var workbook = new XLWorkbook(originalFilePath);
@@ -20,7 +42,7 @@ namespace NormalizatorTests
             Console.WriteLine($"{LogTs()} [API] Plik XLSX otwarty pomyślnie");
 
             var rowsNo = sheet.Rows().Count();
-            Console.WriteLine($"{LogTs()} [API] Start: wiersze={rowsNo - 1}, próg={probabilityThreshold}, równoległość={maxParallelRequests}");
+            Console.WriteLine($"{LogTs()} [API] Start: Rows={rowsNo - 1},  Parallel requests={maxParallelRequests}");
 
             // Tworzymy dodatkowe kolumny na wyniki, aby nie nadpisywać oczekiwanych wartości.
             Console.WriteLine($"{LogTs()} [API] Dodawanie kolumn wynikowych...");
@@ -30,6 +52,22 @@ namespace NormalizatorTests
             Console.WriteLine($"{LogTs()} [API] Analizowanie struktury kolumn...");
             var indexes = GetColumnIndexes(sheet);
             Console.WriteLine($"{LogTs()} [API] Struktura kolumn przeanalizowana");
+
+            // Optymalizacja: wczytujemy wszystkie dane z Excela do pamięci na początku
+            Console.WriteLine($"{LogTs()} [API] Wczytywanie danych z Excela do pamięci...");
+            var rowDataCache = new Dictionary<int, RowData>();
+            for (int i = 2; i <= rowsNo; i++)
+            {
+                rowDataCache[i] = new RowData
+                {
+                    StreetName = NormalizeValue(sheet.Cell(i, indexes.RequestStreetIndex).Value.ToString()),
+                    Prefix = NormalizeValue(sheet.Cell(i, indexes.RequestPrefixIndex).Value.ToString()),
+                    BuildingNo = NormalizeValue(sheet.Cell(i, indexes.RequestBuildingNoIndex).Value.ToString()),
+                    City = NormalizeValue(sheet.Cell(i, indexes.RequestCityIndex).Value.ToString()),
+                    PostalCode = NormalizeValue(sheet.Cell(i, indexes.RequestPostalCodeIndex).Value.ToString())
+                };
+            }
+            Console.WriteLine($"{LogTs()} [API] Wczytano {rowDataCache.Count} wierszy danych do pamięci");
 
             // Kontrolujemy równoległość zapytań, aby nie przeciążyć usługi.
             var semaphore = new SemaphoreSlim(maxParallelRequests);
@@ -42,11 +80,10 @@ namespace NormalizatorTests
             for (int i = 2; i <= rowsNo; i++)
             {
                 tasks.Add(ProcessRow(
-                    sheet,
+                    rowDataCache[i],
                     i,
                     indexes,
                     apiUrl,
-                    probabilityThreshold,
                     semaphore,
                     results,
                     () =>
@@ -70,9 +107,9 @@ namespace NormalizatorTests
             for (int i = 2; i <= rowsNo; i++)
             {
                 var result = results[i];
-                if (result.NormalizationMetadata?.CombinedProbability >= probabilityThreshold && result.Address != null)
+                if (result.Address != null)
                 {
-                    WriteRowResult(sheet, i, indexes, result.Address);
+                    WriteRowResult(sheet, i, indexes, result.Address, result.NormalizationMetadata?.CombinedProbability ?? 0);
                     writtenCount++;
                 }
 
@@ -277,13 +314,22 @@ namespace NormalizatorTests
             "Province"
         };
 
+        // Klasa pomocnicza do przechowywania danych wiersza w pamięci
+        private class RowData
+        {
+            public string StreetName { get; set; } = string.Empty;
+            public string Prefix { get; set; } = string.Empty;
+            public string BuildingNo { get; set; } = string.Empty;
+            public string City { get; set; } = string.Empty;
+            public string PostalCode { get; set; } = string.Empty;
+        }
+
         // Przetwarza pojedynczy wiersz: pobiera wynik z API i zapisuje go w pamięci współdzielonej.
         private static async Task ProcessRow(
-            IXLWorksheet sheet, 
+            RowData rowData, 
             int i, 
             ColumnIndexes indexes, 
             string apiUrl, 
-            decimal probabilityThreshold,
             SemaphoreSlim semaphore,
             ConcurrentDictionary<int, NormalizationApiResponseDto> results,
             Action progressCallback)
@@ -292,10 +338,10 @@ namespace NormalizatorTests
 
             try
             {
-                var result = await GetResultForRow(sheet, i, indexes, apiUrl);
+                var result = await GetResultForRow(rowData, apiUrl);
                 results.TryAdd(i, result);
             }
-            catch(Exception ex)
+            catch
             {
                 // W przypadku błędu zapisujemy pustą odpowiedź, aby nie zatrzymać całego procesu.
                 results.TryAdd(i, new NormalizationApiResponseDto());
@@ -382,7 +428,7 @@ namespace NormalizatorTests
                     var isCorrectCurrentValue = sheet.Cell(rowNo, columnsNo).Value.ToString();
                     if (isCorrectCurrentValue == "1" || isCorrectCurrentValue == string.Empty)
                     {
-                        sheet.Cell(rowNo, columnsNo).Value = color == XLColor.Red ? 0 : 1;
+                        sheet.Cell(rowNo, columnsNo - 1).Value = color == XLColor.Red ? 0 : 1;
                     }                   
                 }
             }
@@ -435,7 +481,7 @@ namespace NormalizatorTests
         }
 
         // Wpisuje wartości zwrócone przez API do kolumn wynikowych (RESULT*).
-        private static void WriteRowResult(IXLWorksheet sheet, int rowNo, ColumnIndexes idx, ApiResponseAddressDto result)
+                private static void WriteRowResult(IXLWorksheet sheet, int rowNo, ColumnIndexes idx, ApiResponseAddressDto result, decimal combinedProbability)
         {
             sheet.Cell(rowNo, idx.ResultBuildingNoIndex).Value = result.BuildingNumber;
             sheet.Cell(rowNo, idx.ResultCityIndex).Value = result.City;
@@ -445,56 +491,44 @@ namespace NormalizatorTests
             sheet.Cell(rowNo, idx.ResultProvinceIndex).Value = result.Province;
             sheet.Cell(rowNo, idx.ResultStreetIndex).Value = result.StreetName;
             sheet.Cell(rowNo, idx.ResultPrefixIndex).Value = result.StreetPrefix;
+            sheet.Cell(rowNo, idx.ProbabilityIndex).Value = combinedProbability;
+        }
+
+        // Pomocnicza metoda do normalizacji wartości z Excela
+        private static string NormalizeValue(string? value)
+        {
+            return value == "null" || value == null ? string.Empty : value;
         }
 
         // Pobiera wartości z wiersza, sanitizuje "null" na puste ciągi i wysyła zapytanie POST do API.
-        private static async Task<NormalizationApiResponseDto> GetResultForRow(IXLWorksheet sheet, int rowNo, ColumnIndexes idx, string endpoint)
+        private static async Task<NormalizationApiResponseDto> GetResultForRow(RowData rowData, string endpoint)
         {
             try
             {
-                var streetName = sheet.Cell(rowNo, idx.RequestStreetIndex).Value.ToString();
-                var prefix = sheet.Cell(rowNo, idx.RequestPrefixIndex).Value.ToString();
-                var buildingNo = sheet.Cell(rowNo, idx.RequestBuildingNoIndex).Value.ToString();
-                var city = sheet.Cell(rowNo, idx.RequestCityIndex).Value.ToString();
-                var postalCode = sheet.Cell(rowNo, idx.RequestPostalCodeIndex).Value.ToString();
-
-                if (streetName == "null")
-                    streetName = string.Empty;
-                if (prefix == "null")
-                    prefix = string.Empty;
-                if (buildingNo == "null")
-                    buildingNo = string.Empty;
-                if (city == "null")
-                    city = string.Empty;
-                if (postalCode == "null")
-                    postalCode = string.Empty;
-
                 var body = new
                 {
-                    StreetName = streetName,
-                    StreetPrefix = prefix,
-                    BuildingNumber = buildingNo,
-                    City = city,
-                    PostalCode = postalCode
+                    StreetName = rowData.StreetName,
+                    StreetPrefix = rowData.Prefix,
+                    BuildingNumber = rowData.BuildingNo,
+                    City = rowData.City,
+                    PostalCode = rowData.PostalCode
                 };
 
-                using (var client = new HttpClient())
+                // Używamy współdzielonego HttpClient zamiast tworzenia nowego dla każdego zapytania
+                var response = await SharedHttpClient.PostAsJsonAsync(endpoint, body);
+                if (!response.IsSuccessStatusCode)
                 {
-                    var response = await client.PostAsJsonAsync(endpoint, body);
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        // Zwracamy pustą odpowiedź, aby przetwarzanie innych wierszy mogło trwać dalej.
-                        return new NormalizationApiResponseDto();
-                    }
-
-                    var responseObject = await response.Content.ReadFromJsonAsync<NormalizationApiResponseDto>();
-                    if (responseObject is null)
-                    {
-                        return new NormalizationApiResponseDto();
-                    }
-
-                    return responseObject;
+                    // Zwracamy pustą odpowiedź, aby przetwarzanie innych wierszy mogło trwać dalej.
+                    return new NormalizationApiResponseDto();
                 }
+
+                var responseObject = await response.Content.ReadFromJsonAsync<NormalizationApiResponseDto>();
+                if (responseObject is null)
+                {
+                    return new NormalizationApiResponseDto();
+                }
+
+                return responseObject;
             }
             catch
             {
@@ -699,10 +733,13 @@ namespace NormalizatorTests
             }
 
             columnsNo = sheet.Columns().Count();
-            sheet.Column(columnsNo).InsertColumnsAfter(1);
+            sheet.Column(columnsNo).InsertColumnsAfter(2);
             sheet.Cell(1, columnsNo + 1).Value = "IsCorrect";
             sheet.Column(columnsNo + 1).SetAutoFilter();
             sheet.Column(columnsNo + 1).Width = 15;
+
+            sheet.Cell(1, columnsNo + 2).Value = "Probability";
+            sheet.Column(columnsNo + 2).Width = 10;
         }
 
         // Odczytuje numery kolumn REQUEST/RESULT na podstawie nagłówków, aby logika była odporna na kolejność kolumn.
@@ -711,6 +748,8 @@ namespace NormalizatorTests
             var result = new ColumnIndexes();
 
             var columnsNo = sheet.Columns().Count();
+            
+            result.ProbabilityIndex = columnsNo;
 
             for (int i = columnsNo; i > 0; i--)
             {
@@ -770,6 +809,7 @@ namespace NormalizatorTests
             public int ResultProvinceIndex { get; set; }
             public int ResultDistrictIndex { get; set; }
             public int ResultCommuneIndex{ get; set; }
+            public int ProbabilityIndex { get; set; }
         }
 
         private class NormalizationApiResponseDto

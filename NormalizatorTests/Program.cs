@@ -9,7 +9,6 @@ var config = new ConfigurationBuilder()
 var originalFilePath = config["OriginalFilePath"];
 var resultFilePath = config["ResultFilePath"];
 var apiUrl = config["ApiUrl"];
-var probabilityThreshold = config.GetValue<decimal>("ProbabilityThreshold", new decimal(0.8));
 var maxParallelRequests = config.GetValue<int>("MaxParallelRequests", 10);
 var enableApi = config.GetValue<bool>("EnableApi", true);
 var enableDb = config.GetValue<bool>("EnableDb", true);
@@ -46,7 +45,7 @@ if (!string.IsNullOrWhiteSpace(dbMappingFilePath) && File.Exists(dbMappingFilePa
 if (enableApi)
 {
     var apiResultPath = AppendTimestampSuffix(resultFilePath);
-    await TestEngine.RunApiTest(originalFilePath!, apiResultPath, apiUrl!, probabilityThreshold, maxParallelRequests);
+    await TestEngine.RunApiTest(originalFilePath!, apiResultPath, apiUrl!, maxParallelRequests);
 }
 
 // Jeśli podano konfigurację DB, wykonujemy dodatkowy scenariusz z bazą
